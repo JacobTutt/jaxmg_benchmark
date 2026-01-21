@@ -1,12 +1,17 @@
+import warnings
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 import os
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+import sys
 import subprocess
 from pathlib import Path
 
 # os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-# os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".95"
+# os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".90"
 os.environ["XLA_PYTHON_CLIENT_ALLOCATOR"] = "platform"
+os.environ["JAXMG_CUSOLVER_UTILS_VERBOSE"] = "0"
 import time
 import numpy as np
 
@@ -19,8 +24,21 @@ from functools import partial
 from jax.sharding import PartitionSpec as P, NamedSharding
 
 from jaxmg import syevd
+from jaxmg.utils import random_psd
 
-from pathlib import Path
+# Allow importing from repo-root when running as a file path
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from benchmark.bench_helpers import (
+    get_gpu_name,
+    make_save_dir,
+    maybe_load_npy,
+    npy_path,
+    save_npy,
+    time_runs,
+)
 
 dtype = jnp.float64
 devices = jax.devices("gpu")
@@ -28,111 +46,90 @@ ndev = len(devices)
 
 n_runs = 5
 
+
 def main_syevd(N, T_A):
 
     print(f"Available devices: {ndev}")
-    gpu_name = ""
-    try:
-        output = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            encoding="utf-8",
-        )
-        gpu_name = output.strip().split("\n")[0]
-    except Exception as e:
-        raise ValueError(f"Error querying GPU name: {e}")
-    gpu_name = "_".join(gpu_name.split(" "))
+    gpu_name = get_gpu_name()
     # PARAMETERS
-    NRHS = 1
-    save_path = f"{Path(__file__).parent}/data_syevd/{gpu_name}/{jnp.dtype(dtype).name}/ndev_{ndev}/"
-    if not os.path.exists(save_path):
-        os.makedirs(save_path)
+    save_dir = make_save_dir(
+        script_file=__file__,
+        data_dir="data_syevd",
+        gpu_name=gpu_name,
+        dtype_name=jnp.dtype(dtype).name,
+        ndev=ndev,
+    )
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
     file_name = f"N_{N}_T_A_{T_A}"
-    if os.path.exists(f"{save_path}{file_name}.npy"):
-        print(f"File: {save_path}{file_name}.npy already found, skipping...")
-        return np.load(f"{save_path}{file_name}.npy")
+    file_path = npy_path(save_dir, file_name)
+    existing = maybe_load_npy(file_path)
+    if existing is not None:
+        print(f"File: {file_path} already found, skipping...")
+        return existing
     # INFO
     print(f"GPU name: {gpu_name}")
     print(f"N={N}, T_A={T_A}, dtype={dtype}")
+    from jaxmg import calculate_padding
+
+    padding = calculate_padding(N // ndev, T_A)
+    print(f"Padding: {padding}")
     print(jnp.dtype(dtype).itemsize)
     print(f"Memory allocated: {N*N*jnp.dtype(dtype).itemsize/1e9} GB")
+    print(f"Memory allocated tile: {N*T_A*jnp.dtype(dtype).itemsize/1e9} GB")
 
     # MESH
-    shard_size = N // ndev
     mesh = jax.make_mesh((ndev,), ("x",))
-    if ndev > 1:
 
-        @jax.jit
-        @partial(jax.shard_map, mesh=mesh, in_specs=(), out_specs=P("x", None))
-        def make_diag():
-            idx = jax.lax.axis_index("x")  # device index
-            col_start = idx * shard_size  # global column offset
-            # Allocate zeros of shape (N, chunk_size). Allocate the padded
-            # first-dimension so we can avoid a separate `pad` op later.
-            # This makes the shard have shape (shard_size + padding, N).
-            local = jnp.zeros((shard_size, N), dtype=dtype)
-            # Global column indices handled by this shard
-            cols = jax.lax.iota(jnp.int32, shard_size) + col_start
-            # Rows = same as global cols (diagonal)
-            rows = cols
-            # Values for the diagonal
-            vals = cols + 1  # because your diag entries are 1..N
-            # Scatter into local slice (adjust columns relative to col_start)
-            local = local.at[(rows - col_start, cols)].set(vals)
-            return local
-
-    else:
-        make_diag = lambda: jax.lax.with_sharding_constraint(
-            jnp.diag(jnp.arange(N, dtype=dtype) + 1), NamedSharding(mesh, P("x", None,))
+    # Build A similar to benchmark_potrs: diagonal matrix sharded on rows
+    @jax.jit
+    def make_A():
+        # _A = jax.lax.with_sharding_constraint(
+        #     random_psd(N, dtype=dtype, seed=100),
+        #     NamedSharding(mesh, P("x", None)),
+        # )
+        _A= jax.lax.with_sharding_constraint(
+            jnp.diag(jnp.arange(N, dtype=dtype) + 1),
+            NamedSharding(mesh, P("x", None)),
         )
+        return _A
 
-    myfn = jax.jit(partial(syevd, mesh=mesh, in_specs=(P("x", None))), static_argnums=1)
+    myfn = jax.jit(
+        partial(syevd, mesh=mesh, in_specs=(P("x", None),)), static_argnums=1
+    )
 
     @jax.jit
     def run_once():
-        A = make_diag()
-        return A
+        A = make_A()
+        ev, V = myfn(A, T_A)
+        return ev, V
 
-    times = []
-    for run in range(n_runs + 1):
-        print("Data allocated")
-
-        start = time.time()
-        A = run_once()
-        A.block_until_ready()
-        ev, V  = myfn(A, T_A)
-        ev.block_until_ready()
-        V.block_until_ready()
-        end = time.time()
-        if run > 0:  # skip jitted run
-            times.append(end - start)
-            print(f"Elapsed time {times[-1]} [s]")
-
-    np.save(f"{save_path}/{file_name}", np.array(times))
-    return np.array(times)
+    times = time_runs(run_once=run_once, n_runs=n_runs, print_alloc_msg="Data allocated")
+    # Keep prior behavior: do not save here
+    return times
 
 
 def main_eigh(N):
 
     print(f"Available devices: {ndev}")
-    gpu_name = ""
-    try:
-        output = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            encoding="utf-8",
-        )
-        gpu_name = output.strip().split("\n")[0]
-    except Exception as e:
-        raise ValueError(f"Error querying GPU name: {e}")
-    gpu_name = "_".join(gpu_name.split(" "))
+    gpu_name = get_gpu_name()
     # PARAMETERS
     NRHS = 1
-    save_path = f"{Path(__file__).parent}/data_syevd/{gpu_name}/{jnp.dtype(dtype).name}/ndev_{ndev}/"
-    if not os.path.exists(save_path):
-        os.makedirs(save_path)
+    save_dir = make_save_dir(
+        script_file=__file__,
+        data_dir="data_syevd",
+        gpu_name=gpu_name,
+        dtype_name=jnp.dtype(dtype).name,
+        ndev=ndev,
+    )
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
     file_name = f"N_{N}_jax_native"
-    if os.path.exists(f"{save_path}{file_name}.npy"):
-        print(f"File: {save_path}{file_name}.npy already found, skipping...")
-        return np.load(f"{save_path}{file_name}.npy")
+    file_path = npy_path(save_dir, file_name)
+    existing = maybe_load_npy(file_path)
+    if existing is not None:
+        print(f"File: {file_path} already found, skipping...")
+        return existing
     # INFO
     print(f"GPU name: {gpu_name}")
     print(f"N={N}, dtype={dtype}")
@@ -151,31 +148,32 @@ def main_eigh(N):
         A = make_diag()
         return A
 
-    times = []
-    for run in range(n_runs + 1):
-        print("Data allocated")
-
-        start = time.time()
+    def run_once_with_eigh():
         A = run_once()
         A.block_until_ready()
-        ev, V = eigh(A)
-        ev.block_until_ready()
-        V.block_until_ready()
-        end = time.time()
-        if run > 0:  # skip jitted run
-            times.append(end - start)
-            print(f"Elapsed time {times[-1]} [s]")
+        return eigh(A)
 
-    np.save(f"{save_path}/{file_name}", np.array(times))
-    return np.array(times)
+    times = time_runs(run_once=run_once_with_eigh, n_runs=n_runs, print_alloc_msg="Data allocated")
+    save_npy(file_path, times)
+    return times
 
 
 if __name__ == "__main__":
 
-    for N in [2**i for i in range(4, 18)] + [58000] + [140000]:
+    for N in (
+        [2**i for i in range(9, 16)]
+        + [2**15 + 2**14]
+        + [2**16]
+        + [2**16 + 2**15]
+        + [2**17]
+        + [2**17 + 2**16]
+        + [2**18] + [2**18 + 2**16]
+        + [2**18 +2**17]
+        + [2**19]
+    ):
         if ndev == 1:
             main_eigh(N)
         else:
-            for T_A in [2**i for i in range(8,11)]:
+            for T_A in [2**i for i in range(8, 11)]:
                 print(f"N={N}, T_A={T_A}")
                 main_syevd(N, T_A=T_A)

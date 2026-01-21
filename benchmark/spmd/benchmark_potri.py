@@ -23,10 +23,8 @@ import jax.numpy as jnp
 from functools import partial
 from jax.sharding import PartitionSpec as P, NamedSharding
 
-from jaxmg import potrs
-from jaxmg.utils import random_psd
-
-from pathlib import Path
+from jaxmg import potri
+from jaxmg import calculate_padding
 
 # Allow importing from repo-root when running as a file path
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -42,22 +40,21 @@ from benchmark.bench_helpers import (
     time_runs,
 )
 
-dtype = jnp.float32
+dtype = jnp.complex128
 devices = jax.devices("gpu")
 ndev = len(devices)
 
 n_runs = 5
 
 
-def main_potrs(N, T_A):
+def main_potri(N, T_A):
 
     print(f"Available devices: {ndev}")
     gpu_name = get_gpu_name()
-    # PARAMETERS
-    NRHS = 1
+    # PATHS
     save_dir = make_save_dir(
         script_file=__file__,
-        data_dir="data_potrs",
+        data_dir="data_potri",
         gpu_name=gpu_name,
         dtype_name=jnp.dtype(dtype).name,
         ndev=ndev,
@@ -70,58 +67,51 @@ def main_potrs(N, T_A):
     if existing is not None:
         print(f"File: {file_path} already found, skipping...")
         return existing
+
     # INFO
     print(f"GPU name: {gpu_name}")
     print(f"N={N}, T_A={T_A}, dtype={dtype}")
-    from jaxmg import calculate_padding
-
-    padding = calculate_padding(N // ndev, T_A)
+    padding = calculate_padding(N // max(1, ndev), T_A)
     print(f"Padding: {padding}")
     print(jnp.dtype(dtype).itemsize)
     print(f"Memory allocated: {N*N*jnp.dtype(dtype).itemsize/1e9} GB")
     print(f"Memory allocated tile: {N*T_A*jnp.dtype(dtype).itemsize/1e9} GB")
 
     # MESH
-    shard_size = N // ndev
     mesh = jax.make_mesh((ndev,), ("x",))
 
+    # Build A: diagonal SPD, sharded on rows
+    @jax.jit
+    def make_A():
+        return jax.lax.with_sharding_constraint(
+            jnp.diag(jnp.arange(N, dtype=dtype) + 1),
+            NamedSharding(mesh, P("x", None)),
+        )
+
     myfn = jax.jit(
-        partial(potrs, mesh=mesh, in_specs=(P("x", None), P(None, None))),
-        static_argnums=2,
+        partial(potri, mesh=mesh, in_specs=(P("x", None),), pad=True),
+        static_argnums=1,
     )
 
     @jax.jit
     def run_once():
-        # _A = jax.lax.with_sharding_constraint(
-        #     random_psd(N, dtype=dtype, seed=100),
-        #     NamedSharding(mesh, P("x", None)),
-        # )
-        # return jax.lax.with_sharding_constraint(
-        #     jnp.diag(jnp.arange(N, dtype=dtype) + 1),
-        #     NamedSharding(mesh, P("x", None)),
-        # )
-        _A = jax.lax.with_sharding_constraint(
-            jnp.diag(jnp.arange(N, dtype=dtype) + 1), NamedSharding(mesh, P( "x", None))
-        )
-        _b = jax.lax.with_sharding_constraint(
-            jnp.ones((N, NRHS), dtype=dtype), NamedSharding(mesh, P(None, None))
-        )
-        return myfn(_A, _b, T_A)
+        A = make_A()
+        out = myfn(A, T_A)
+        return out
 
     times = time_runs(run_once=run_once, n_runs=n_runs, print_alloc_msg="Data allocated")
     save_npy(file_path, times)
     return times
 
 
-def main_cho_solve(N):
+def main_inverse(N):
 
     print(f"Available devices: {ndev}")
     gpu_name = get_gpu_name()
-    # PARAMETERS
-    NRHS = 1
+    # PATHS
     save_dir = make_save_dir(
         script_file=__file__,
-        data_dir="data_potrs",
+        data_dir="data_potri",
         gpu_name=gpu_name,
         dtype_name=jnp.dtype(dtype).name,
         ndev=ndev,
@@ -134,23 +124,22 @@ def main_cho_solve(N):
     if existing is not None:
         print(f"File: {file_path} already found, skipping...")
         return existing
+
     # INFO
     print(f"GPU name: {gpu_name}")
     print(f"N={N}, dtype={dtype}")
     print(jnp.dtype(dtype).itemsize)
     print(f"Memory allocated: {N*N*jnp.dtype(dtype).itemsize/1e9} GB")
-    # MESH
 
     @partial(jax.jit, donate_argnums=0)
-    def chosolve(A, b):
-        cfac = jax.scipy.linalg.cho_factor(A, overwrite_a=True, check_finite=False)
-        return jax.scipy.linalg.cho_solve(cfac, b)
+    def inverse(A):
+        return jnp.linalg.inv(A)
 
     @jax.jit
     def run_once():
         A = jnp.diag(jnp.arange(N, dtype=dtype) + 1)
-        b = jnp.ones((N, NRHS), dtype=dtype)
-        return chosolve(A, b)
+        out = inverse(A)
+        return out
 
     times = time_runs(run_once=run_once, n_runs=n_runs, print_alloc_msg="Data allocated")
     save_npy(file_path, times)
@@ -171,8 +160,8 @@ if __name__ == "__main__":
         + [2**19]
     ):
         if ndev == 1:
-            main_cho_solve(N)
+            main_inverse(N)
         else:
-            for T_A in [2**i for i in range(8, 14)]:
+            for T_A in [2**i for i in range(8, 13)]:
                 print(f"N={N}, T_A={T_A}")
-                main_potrs(N, T_A=T_A)
+                main_potri(N, T_A=T_A)

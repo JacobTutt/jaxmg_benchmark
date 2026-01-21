@@ -2,7 +2,7 @@
 import os
 
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".90"
-os.environ["JAXMG_CUSOLVER_UTILS_VERBOSE"] = "1"
+os.environ["JAXMG_CUSOLVER_UTILS_VERBOSE"] = "0"
 
 import sys
 
@@ -58,6 +58,7 @@ mesh = jax.make_mesh((ndev,), ("x",))
 import re
 import subprocess
 from pathlib import Path
+
 # import matplotlib.pyplot as plt
 
 
@@ -184,14 +185,14 @@ def main_potrs(N, T_A):
     print(f"Memory allocated: {N*N*jnp.dtype(dtype).itemsize/1e9} GB")
 
     myfn = jax.jit(
-        partial(potrs, mesh=mesh, in_specs=(P("x", None), P(None, None))), 
-        static_argnums=2, 
+        partial(potrs, mesh=mesh, in_specs=(P("x", None), P(None, None))),
+        static_argnums=2,
     )
 
     @jax.jit
     def run_once():
         _A = jax.lax.with_sharding_constraint(
-            jnp.diag(jnp.arange(N, dtype=dtype) + 1), NamedSharding(mesh, P( "x", None))
+            jnp.diag(jnp.arange(N, dtype=dtype) + 1), NamedSharding(mesh, P("x", None))
         )
         _b = jax.lax.with_sharding_constraint(
             jnp.ones((N, NRHS), dtype=dtype), NamedSharding(mesh, P(None, None))
@@ -284,12 +285,12 @@ def main():
         + [2**17 + 2**16]
         + [2**18]
     ):
-        # if ndev == 1:
-        #     main_cho_solve(N)
-        # else:
-        for T_A in [2**i for i in range(8, 13)]:
-            print(f"N={N}, T_A={T_A}")
-            main_potrs(N, T_A=T_A)
+        if ndev == 1:
+            main_cho_solve(N)
+        else:
+            for T_A in [2**i for i in range(8, 13)]:
+                print(f"N={N}, T_A={T_A}")
+                main_potrs(N, T_A=T_A)
 
 
 main()

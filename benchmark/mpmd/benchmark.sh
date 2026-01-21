@@ -1,12 +1,25 @@
 #!/usr/bin/env bash
 
-# Require first argument: number of processes
-if [ -z "${1:-}" ]; then
-  echo "Usage: $0 <num_processes>"
+# Require arguments: number of processes and benchmark name
+if [ -z "${1:-}" ] || [ -z "${2:-}" ]; then
+  echo "Usage: $0 <num_processes> <benchmark:{potrs|potri|syevd}>"
   exit 1
 fi
 
 num_processes="$1"
+benchmark_name="$2"
+
+# Validate benchmark name
+case "$benchmark_name" in
+  potrs|potri|syevd)
+    ;;
+  *)
+    echo "Invalid benchmark '$benchmark_name'. Allowed: potrs, potri, syevd"
+    exit 1
+    ;;
+esac
+
+script="benchmark_${benchmark_name}.py"
 
 # export CUDA_VISIBLE_DEVICES="0"
 range=$(seq 0 $(($num_processes - 1)))
@@ -14,7 +27,8 @@ HOSTS=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
 echo $HOSTS
 MASTER=${HOSTS[0]}
 for i in $range; do
-  python -u benchmark.py "$MASTER:10001" $i $num_processes > /tmp/toy_$i.out &
+  echo "Launching $script for process $i of $num_processes"
+  python -u "$script" "$MASTER:10001" $i $num_processes > /tmp/toy_$i.out &
 done
 
 wait
