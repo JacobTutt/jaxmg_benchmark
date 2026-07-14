@@ -87,20 +87,33 @@ def main() -> None:
     }
     selected_sizes = set(args.matrix_size or ())
     if selected_sizes:
-        invalid_sizes = {
-            size
-            for size in selected_sizes
-            if not any(size in planned for planned in planned_by_tile.values())
+        # An explicit matrix-size request is allowed outside the default ladder
+        # when it is a valid no-padding case for the selected tile size. This
+        # supports targeted memory-limit checks without mutating the standard
+        # reproducible sweep configuration.
+        planned_by_tile = {
+            tile: tuple(
+                sorted(
+                    size
+                    for size in selected_sizes
+                    if not BenchmarkCase(
+                        args.routine, args.dtype, args.grid, size, tile
+                    ).needs_matrix_padding
+                )
+            )
+            for tile in selected_tiles
         }
-        if invalid_sizes:
+        planned_by_tile = {
+            tile: sizes for tile, sizes in planned_by_tile.items() if sizes
+        }
+        if not planned_by_tile:
             raise ValueError(
-                f"matrix sizes are not planned no-padding cases: {sorted(invalid_sizes)}"
+                "no selected matrix size is tile-aligned for the selected grid"
             )
     cases = [
         BenchmarkCase(args.routine, args.dtype, args.grid, size, tile)
         for tile, sizes in planned_by_tile.items()
         for size in sizes
-        if not selected_sizes or size in selected_sizes
     ]
     print(f"suite={suite} cases={len(cases)}", flush=True)
     for index, case in enumerate(cases, start=1):
