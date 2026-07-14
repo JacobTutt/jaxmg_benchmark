@@ -1,35 +1,22 @@
 # JAXMg Benchmark
 
 This repository benchmarks the distributed `jaxmg.potrs` and
-`jaxmg.lu_solve` APIs backed by cuSOLVERMp. The current benchmark suite uses
-one Python process per GPU and supports 1-4 Isambard-AI nodes (4-16 GPUs).
-
-The older cuSOLVERMg benchmark programs remain under `benchmark/mpmd` and
-`benchmark/spmd` for reference. New cuSOLVERMp runs use
-`benchmark/cusolvermp`.
+`jaxmg.lu_solve` APIs backed by cuSOLVERMp. The suite uses one Python process
+per GPU and supports 1-4 Isambard-AI nodes (4-16 GPUs).
 
 ## Installation
 
-Install the requirements that match your GPU's CUDA major version:
-
-- CUDA 12.x GPUs: use [requirements_cuda12.txt](requirements_cuda12.txt)
-- CUDA 13.x GPUs: use [requirements_cuda13.txt](requirements_cuda13.txt)
-
-Example commands:
+Install the JAXMg wheel built from the target branch, then install the Python
+benchmark dependencies that match its pinned CUDA/JAX release:
 
 ```bash
 # Create and activate a virtual environment (optional but recommended)
 python -m venv .venv
 source .venv/bin/activate
 
-# Install deps for CUDA 12.x GPUs
-pip install -r requirements_cuda12.txt
-
-# OR, for CUDA 13.x GPUs
-pip install -r requirements_cuda13.txt
+# JAXMg's cuSOLVERMp backend currently targets CUDA 12 / JAX 0.10.1.
+pip install -r requirements_cusolvermp_cuda12.txt
 ```
-
-If you're unsure of your CUDA version, check your NVIDIA driver/CUDA toolkit or run `nvidia-smi` and consult cluster documentation.
 
 ## cuSOLVERMp suite
 
@@ -70,9 +57,7 @@ export JAXMG_SOURCE_ROOT=/projects/u6my/users/$USER/JAXMG/jaxmg
 ```
 
 For a new environment, install the target branch's Jenkins wheel (or its Bazel
-build) and then install `requirements_cusolvermp_cuda12.txt`. Do not use the
-legacy CUDA requirement files for this suite; they intentionally preserve the
-package versions used by the historical cuSOLVERMg benchmarks.
+build) and then install `requirements_cusolvermp_cuda12.txt`.
 
 It sets the validated allocator configuration before Python imports JAX:
 
