@@ -161,6 +161,11 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
     rank_codes: list[int] = []
     total_runs = config.cold_runs + config.warm_runs
     for iteration in range(total_runs):
+        phase = "cold" if iteration < config.cold_runs else "warm"
+        phase_iteration = iteration + 1 if phase == "cold" else iteration - config.cold_runs + 1
+        phase_total = config.cold_runs if phase == "cold" else config.warm_runs
+        if jax.process_index() == 0:
+            print(f"{case.case_id}: {phase} {phase_iteration}/{phase_total} start", flush=True)
         a, b = make_inputs()
         _synchronize_inputs(a, b)
         multihost_utils.sync_global_devices(f"{case.case_id}_{iteration}_start")
@@ -181,6 +186,12 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
         maximum_error, rank_codes = _validate(
             out=out, status=status, status_size=status_size, dtype_name=case.dtype
         )
+        if jax.process_index() == 0:
+            print(
+                f"{case.case_id}: {phase} {phase_iteration}/{phase_total} "
+                f"complete ({timings[-1]:.3f} s)",
+                flush=True,
+            )
         del a, b, out, status
         gc.collect()
 
