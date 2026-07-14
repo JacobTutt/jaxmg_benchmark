@@ -24,6 +24,8 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--routine", choices=("potrs", "lu_solve"), required=True)
     parser.add_argument("--dtype", choices=("float32", "float64", "complex64", "complex128"), required=True)
     parser.add_argument("--grid", type=ProcessGrid.parse, required=True)
+    parser.add_argument("--tile-size", type=int, action="append")
+    parser.add_argument("--matrix-size", type=int, action="append")
     parser.add_argument("--output-root", default="results")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--retry-failures", action="store_true")
@@ -76,12 +78,29 @@ def main() -> None:
     result_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    selected_tiles = tuple(args.tile_size or config.tiles)
+    if set(selected_tiles) - set(config.tiles):
+        raise ValueError("every selected tile size must be configured")
+    planned_by_tile = {
+        tile: planned_sizes(config, dtype=args.dtype, grid=args.grid, tile_size=tile)
+        for tile in selected_tiles
+    }
+    selected_sizes = set(args.matrix_size or ())
+    if selected_sizes:
+        invalid_sizes = {
+            size
+            for size in selected_sizes
+            if not any(size in planned for planned in planned_by_tile.values())
+        }
+        if invalid_sizes:
+            raise ValueError(
+                f"matrix sizes are not planned no-padding cases: {sorted(invalid_sizes)}"
+            )
     cases = [
         BenchmarkCase(args.routine, args.dtype, args.grid, size, tile)
-        for tile in config.tiles
-        for size in planned_sizes(
-            config, dtype=args.dtype, grid=args.grid, tile_size=tile
-        )
+        for tile, sizes in planned_by_tile.items()
+        for size in sizes
+        if not selected_sizes or size in selected_sizes
     ]
     print(f"suite={suite} cases={len(cases)}", flush=True)
     for index, case in enumerate(cases, start=1):
