@@ -124,11 +124,16 @@ def _validate(
 
 def _run(args: argparse.Namespace) -> dict[str, object]:
     """Execute the configured cold and warm solver calls."""
-    from jaxmg import lu_solve, potrs
-    from jaxmg._cusolvermp_status import (
-        _CUSOLVERMP_LU_SOLVE_STATUS_SIZE,
-        _CUSOLVERMP_POTRS_STATUS_SIZE,
-    )
+    if args.routine == "potrs":
+        from jaxmg import potrs as solver
+        from jaxmg._cusolvermp_status import (
+            _CUSOLVERMP_POTRS_STATUS_SIZE as status_size,
+        )
+    else:
+        from jaxmg import lu_solve as solver
+        from jaxmg._cusolvermp_status import (
+            _CUSOLVERMP_LU_SOLVE_STATUS_SIZE as status_size,
+        )
 
     config = BenchmarkConfig.load(args.config)
     case = BenchmarkCase(
@@ -151,13 +156,6 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
     make_inputs = _make_input_factory(
         matrix_size=case.matrix_size, dtype=dtype, mesh=mesh
     )
-    solver = potrs if case.routine == "potrs" else lu_solve
-    status_size = (
-        _CUSOLVERMP_POTRS_STATUS_SIZE
-        if case.routine == "potrs"
-        else _CUSOLVERMP_LU_SOLVE_STATUS_SIZE
-    )
-
     timings: list[float] = []
     maximum_error = 0.0
     rank_codes: list[int] = []
