@@ -14,6 +14,12 @@ from benchmark.cusolvermp.model import BenchmarkConfig, ProcessGrid, planned_siz
 
 
 def _arguments() -> argparse.Namespace:
+    """Read submission filters and the explicit ``--submit`` confirmation.
+
+    Returns:
+        Parsed configuration, script, output root, optional case filters, and
+        whether Slurm submission was requested.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/isambard_gh200.toml")
     parser.add_argument("--script", default="slurm/isambard_suite.sbatch")
@@ -28,7 +34,16 @@ def _arguments() -> argparse.Namespace:
 def _case_count(
     config: BenchmarkConfig, *, dtype: str, grid: ProcessGrid
 ) -> int:
-    """Count the matrix-size and tile-size combinations in one suite."""
+    """Count matrix-size and tile-size combinations in one suite.
+
+    Args:
+        config: Benchmark configuration defining the size sweep.
+        dtype: Matrix element dtype.
+        grid: GPU process grid.
+
+    Returns:
+        Number of fresh ``srun`` cases the outer job will launch.
+    """
     return sum(
         len(planned_sizes(config, dtype=dtype, grid=grid, tile_size=tile))
         for tile in config.tiles
@@ -36,7 +51,16 @@ def _case_count(
 
 
 def _job_name(routine: str, dtype: str, grid: ProcessGrid) -> str:
-    """Return a short Slurm job name that is still readable in ``squeue``."""
+    """Return a short Slurm job name that remains readable in ``squeue``.
+
+    Args:
+        routine: Solver name.
+        dtype: Matrix element dtype.
+        grid: GPU process grid.
+
+    Returns:
+        A compact job name containing the solver, dtype, and grid.
+    """
     short_dtype = dtype.replace("complex", "c").replace("float", "f")
     return f"jaxmg_{routine}_{short_dtype}_{grid}"
 
@@ -55,6 +79,18 @@ def _submission_command(
 
     The outer allocation reserves whole nodes. ``run_suite.py`` then starts a
     separate one-process-per-GPU ``srun`` for each matrix-size/tile-size case.
+
+    Args:
+        config: Hardware, CPU, memory, and wall-time settings.
+        config_path: Absolute benchmark TOML path.
+        script_path: Slurm wrapper that activates the runtime environment.
+        output_root: Root directory for case JSON files and logs.
+        routine: Selected solver.
+        dtype: Selected matrix dtype.
+        grid: Selected GPU process grid.
+
+    Returns:
+        Argument vector suitable for ``subprocess.run``.
     """
     nodes = grid.processes // config.gpus_per_node
     exported = (
@@ -98,6 +134,7 @@ def _submission_command(
 
 
 def main() -> None:
+    """Print the selected Slurm jobs and optionally submit each one."""
     args = _arguments()
     config_path = Path(args.config).resolve()
     script_path = Path(args.script).resolve()

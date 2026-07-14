@@ -23,6 +23,11 @@ from benchmark.cusolvermp.model import (
 
 
 def _arguments() -> argparse.Namespace:
+    """Read the solver, dtype, grid, and optional size filters for one suite.
+
+    Returns:
+        Parsed command-line settings used to select and launch cases.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
     parser.add_argument("--routine", choices=("potrs", "lu_solve"), required=True)
@@ -41,6 +46,15 @@ def _arguments() -> argparse.Namespace:
 
 
 def _existing_pass(path: Path) -> bool:
+    """Return whether a result path contains a completed passing case.
+
+    Args:
+        path: Expected JSON result path.
+
+    Returns:
+        ``True`` only when the file exists, parses as JSON, and records
+        ``status == "passed"``.
+    """
     try:
         return json.loads(path.read_text(encoding="utf-8")).get("status") == "passed"
     except (FileNotFoundError, json.JSONDecodeError):
@@ -49,7 +63,14 @@ def _existing_pass(path: Path) -> bool:
 
 def _write_failure(path: Path, case: BenchmarkCase, returncode: int | str,
                    elapsed: float) -> None:
-    """Record a failed case in the same place as successful JSON records."""
+    """Write a minimal failure record beside successful case results.
+
+    Args:
+        path: Destination JSON path.
+        case: Case that exited unsuccessfully.
+        returncode: ``srun`` exit code or ``"timeout"``.
+        elapsed: Time spent waiting for the failed process group.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
@@ -73,7 +94,18 @@ def _write_failure(path: Path, case: BenchmarkCase, returncode: int | str,
 
 
 def _selected_tiles(args: argparse.Namespace, config: BenchmarkConfig) -> tuple[int, ...]:
-    """Return requested tile sizes after checking the configuration."""
+    """Return requested tile sizes after checking the configuration.
+
+    Args:
+        args: Parsed suite options, which may include repeated tile filters.
+        config: Benchmark configuration defining allowed tile widths.
+
+    Returns:
+        Selected tile widths in command-line or configuration order.
+
+    Raises:
+        ValueError: If a requested width is not configured.
+    """
     tiles = tuple(args.tile_size or config.tiles)
     if set(tiles) - set(config.tiles):
         raise ValueError("every selected tile size must be configured")
@@ -86,7 +118,16 @@ def _selected_sizes(
     *,
     tile_size: int,
 ) -> tuple[int, ...]:
-    """Return either the standard size sweep or explicit aligned dimensions."""
+    """Return the standard size sweep or explicit no-padding dimensions.
+
+    Args:
+        args: Parsed suite options, which may include repeated size filters.
+        config: Benchmark configuration used for the default sweep.
+        tile_size: Tile width for which dimensions must be aligned.
+
+    Returns:
+        Sorted matrix dimensions valid for the selected tile width.
+    """
     if not args.matrix_size:
         return planned_sizes(
             config,
@@ -110,7 +151,18 @@ def _selected_sizes(
 def _selected_cases(
     args: argparse.Namespace, config: BenchmarkConfig
 ) -> list[BenchmarkCase]:
-    """Build the ordered case list printed before the suite starts."""
+    """Build the ordered case list printed before the suite starts.
+
+    Args:
+        args: Solver, dtype, grid, and optional tile/size selections.
+        config: Benchmark configuration defining the allowed sweep.
+
+    Returns:
+        Cases ordered by tile width and then matrix dimension.
+
+    Raises:
+        ValueError: If no requested dimension is valid for the selected grid.
+    """
     cases = []
     for tile_size in _selected_tiles(args, config):
         sizes = _selected_sizes(args, config, tile_size=tile_size)
@@ -130,7 +182,17 @@ def _srun_command(
     config_path: Path,
     output: Path,
 ) -> list[str]:
-    """Build the ``srun`` command for a single fresh benchmark case."""
+    """Build the ``srun`` command for a single fresh benchmark case.
+
+    Args:
+        case: Solver/dtype/grid/size/tile combination to execute.
+        config: Hardware and CPU allocation settings.
+        config_path: Absolute TOML configuration path visible to workers.
+        output: Absolute JSON result path written by rank zero.
+
+    Returns:
+        Argument vector suitable for ``subprocess.run``.
+    """
     nodes = case.grid.processes // config.gpus_per_node
     return [
         "srun",
@@ -173,7 +235,15 @@ def _run_case(
     case: BenchmarkCase,
     timeout_seconds: int,
 ) -> None:
-    """Run one case, preserving its combined log and a failure JSON if needed."""
+    """Run one case, preserving its combined log and a failure JSON if needed.
+
+    Args:
+        command: Full ``srun`` argument vector.
+        output: Expected result JSON path.
+        log_path: Combined stdout/stderr log for the process group.
+        case: Case metadata written if ``srun`` fails.
+        timeout_seconds: Maximum process-group runtime before termination.
+    """
     started = time.perf_counter()
     try:
         with log_path.open("w", encoding="utf-8") as log:
@@ -192,6 +262,7 @@ def _run_case(
 
 
 def main() -> None:
+    """Launch every selected case sequentially from one outer Slurm allocation."""
     args = _arguments()
     config = BenchmarkConfig.load(args.config)
     if args.routine not in config.routines or args.dtype not in config.dtypes:

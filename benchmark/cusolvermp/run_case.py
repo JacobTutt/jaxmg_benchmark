@@ -34,6 +34,12 @@ from benchmark.cusolvermp.model import BenchmarkCase, BenchmarkConfig, ProcessGr
 
 
 def _arguments() -> argparse.Namespace:
+    """Read the command-line description of one fresh benchmark case.
+
+    Returns:
+        Parsed configuration path, solver, dtype, grid, matrix size, tile size,
+        and destination JSON path.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
     parser.add_argument("--routine", choices=("potrs", "lu_solve"), required=True)
@@ -50,7 +56,12 @@ def _arguments() -> argparse.Namespace:
 
 
 def _atomic_json(path: Path, payload: dict[str, object]) -> None:
-    """Write a complete result atomically so interrupted cases are obvious."""
+    """Write a complete JSON result without exposing a partial file.
+
+    Args:
+        path: Final result path written by rank zero.
+        payload: JSON-serialisable benchmark result.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", dir=path.parent, delete=False
@@ -62,20 +73,44 @@ def _atomic_json(path: Path, payload: dict[str, object]) -> None:
 
 
 def _global_numpy(value: jax.Array) -> np.ndarray:
-    """Materialize a small global result from a possibly multi-host array."""
+    """Materialize a small distributed result as one NumPy array.
+
+    Args:
+        value: A JAX array that may be distributed across hosts.
+
+    Returns:
+        The complete global value on every host when gathering is required.
+    """
     if not value.is_fully_addressable:
         return np.asarray(multihost_utils.process_allgather(value, tiled=True))
     return np.asarray(value)
 
 
 def _global_max_seconds(elapsed: float) -> float:
-    """Use the slowest rank as the distributed wall-clock duration."""
+    """Return the largest elapsed time reported by any process.
+
+    Args:
+        elapsed: Local elapsed wall-clock seconds.
+
+    Returns:
+        The slowest rank's duration, used as the distributed solve time.
+    """
     gathered = multihost_utils.process_allgather(jnp.asarray(elapsed), tiled=False)
     return float(np.max(np.asarray(gathered)))
 
 
 def _make_mesh(grid: ProcessGrid) -> Mesh:
-    """Construct the explicit row-major JAX mesh expected by cuSOLVERMp."""
+    """Construct the row-major JAX mesh used by cuSOLVERMp.
+
+    Args:
+        grid: Requested process-grid shape.
+
+    Returns:
+        A mesh with ``pr`` and ``pc`` axes.
+
+    Raises:
+        RuntimeError: If the visible GPU count does not match the grid.
+    """
     devices = np.asarray(jax.devices("gpu"), dtype=object)
     if devices.size != grid.processes:
         raise RuntimeError(
@@ -87,11 +122,21 @@ def _make_mesh(grid: ProcessGrid) -> Mesh:
 def _make_input_factory(
     *, matrix_size: int, dtype: jnp.dtype, mesh: Mesh
 ):
-    """Create the diagonal test system outside the timed solver call."""
+    """Build a compiled factory for the diagonal system used by a case.
+
+    Args:
+        matrix_size: Global square matrix dimension.
+        dtype: JAX dtype for both matrix and right-hand side.
+        mesh: Mesh determining the output sharding.
+
+    Returns:
+        A zero-argument jitted function returning sharded ``(A, b)`` arrays.
+    """
     a_sharding = NamedSharding(mesh, P("pr", "pc"))
     b_sharding = NamedSharding(mesh, P("pr", None))
 
     def make_inputs():
+        """Return ``diag(1, ..., N)`` and an all-ones single-column RHS."""
         diagonal = jnp.arange(1, matrix_size + 1, dtype=dtype)
         a = jnp.diag(diagonal)
         b = jnp.ones((matrix_size, 1), dtype=dtype)
@@ -101,7 +146,12 @@ def _make_input_factory(
 
 
 def _wait_for_inputs(a: jax.Array, b: jax.Array) -> None:
-    """Ensure the input factory has completed before starting the timer."""
+    """Wait until both input arrays are ready before starting the timer.
+
+    Args:
+        a: Sharded coefficient matrix.
+        b: Sharded or replicated right-hand side.
+    """
     for leaf in jax.tree_util.tree_leaves((a, b)):
         leaf.block_until_ready()
 
@@ -109,7 +159,20 @@ def _wait_for_inputs(a: jax.Array, b: jax.Array) -> None:
 def _validate(
     *, out: jax.Array, status: jax.Array, status_size: int, dtype_name: str
 ) -> tuple[float, list[int]]:
-    """Validate the diagonal solve and every rank's native status word."""
+    """Validate the diagonal solution and native status from every rank.
+
+    Args:
+        out: Returned solution vector or matrix.
+        status: Concatenated native status values.
+        status_size: Number of status values emitted by one rank.
+        dtype_name: Benchmark dtype, used to select numerical tolerance.
+
+    Returns:
+        The largest absolute solution error and one native return code per rank.
+
+    Raises:
+        AssertionError: If the solution, status shape, or native status fails.
+    """
     solution = _global_numpy(out).reshape(-1)
     expected = 1.0 / np.arange(1, solution.size + 1, dtype=np.float64)
     maximum_error = float(np.max(np.abs(solution - expected)))
@@ -127,7 +190,14 @@ def _validate(
 
 
 def _solver_for(routine: str):
-    """Load the requested public solver and its per-rank status layout."""
+    """Load the requested public solver and its per-rank status layout.
+
+    Args:
+        routine: ``"potrs"`` or ``"lu_solve"``.
+
+    Returns:
+        The public JAXMg solver and its native status-vector length.
+    """
     if routine == "potrs":
         from jaxmg import potrs as solver
         from jaxmg._cusolvermp_status import (
@@ -142,7 +212,15 @@ def _solver_for(routine: str):
 
 
 def _check_case(case: BenchmarkCase) -> None:
-    """Check the supported MPMD layout before allocating a matrix."""
+    """Check that a case is valid for one-process-per-GPU execution.
+
+    Args:
+        case: Requested benchmark case.
+
+    Raises:
+        ValueError: If the matrix dimension requires padding.
+        RuntimeError: If JAX's processes or visible GPUs do not match the grid.
+    """
     if case.needs_matrix_padding:
         raise ValueError(
             f"{case.case_id} needs matrix padding; N must be divisible by "
@@ -157,7 +235,16 @@ def _check_case(case: BenchmarkCase) -> None:
 
 
 def _phase(iteration: int, cold_runs: int, warm_runs: int) -> tuple[str, int, int]:
-    """Return a readable phase label and one-based counter for an iteration."""
+    """Describe the cold or warm phase for a zero-based iteration.
+
+    Args:
+        iteration: Zero-based call index.
+        cold_runs: Number of cold calls, currently one.
+        warm_runs: Number of warm calls after compilation.
+
+    Returns:
+        Phase name, one-based phase index, and total calls in that phase.
+    """
     if iteration < cold_runs:
         return "cold", iteration + 1, cold_runs
     return "warm", iteration - cold_runs + 1, warm_runs
@@ -171,7 +258,18 @@ def _solve_once(
     tile_size: int,
     mesh: Mesh,
 ) -> tuple[jax.Array, jax.Array, float]:
-    """Run one solver call and report the slowest rank's elapsed time."""
+    """Run one solver call and measure the slowest participating rank.
+
+    Args:
+        solver: Public JAXMg POTRS or LU-solve callable.
+        a: Sharded coefficient matrix.
+        b: Right-hand side matching ``a``.
+        tile_size: cuSOLVERMp tile width.
+        mesh: Distributed process mesh.
+
+    Returns:
+        The solution, native status array, and maximum elapsed seconds.
+    """
     started = time.perf_counter()
     out, status = solver(
         a,
@@ -188,7 +286,12 @@ def _solve_once(
 
 
 def _package_versions() -> dict[str, str | None]:
-    """Record package versions with the result for later comparison."""
+    """Return installed package versions recorded with each result.
+
+    Returns:
+        Package-name to version mapping. Optional CUDA packages are recorded as
+        ``None`` when their metadata is unavailable.
+    """
     versions: dict[str, str | None] = {}
     for package in ("jax", "jaxlib", "jaxmg", "nvidia-cusolvermp-cu12"):
         try:
@@ -199,7 +302,14 @@ def _package_versions() -> dict[str, str | None]:
 
 
 def _run(args: argparse.Namespace) -> dict[str, object]:
-    """Create inputs, time one cold and several warm calls, then save a result."""
+    """Run the configured case and return its rank-zero JSON payload.
+
+    Args:
+        args: Parsed case description from ``_arguments``.
+
+    Returns:
+        Complete case metadata, timings, validation results, and package data.
+    """
     solver, status_size = _solver_for(args.routine)
 
     config = BenchmarkConfig.load(args.config)
@@ -273,6 +383,7 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
 
 
 def main() -> None:
+    """Initialize distributed JAX, run the case, and write one result on rank zero."""
     args = _arguments()
     # Slurm supplies rank and coordinator metadata. This makes the one GPU
     # assigned to each process explicit to JAX.

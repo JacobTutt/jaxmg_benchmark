@@ -23,14 +23,29 @@ DTYPE_BYTES = {
 }
 @dataclass(frozen=True, order=True)
 class ProcessGrid:
-    """A row-major cuSOLVERMp process grid."""
+    """Two-dimensional arrangement of the GPU processes used by cuSOLVERMp.
+
+    Attributes:
+        rows: Number of process rows.
+        cols: Number of process columns.
+    """
 
     rows: int
     cols: int
 
     @classmethod
     def parse(cls, value: str) -> "ProcessGrid":
-        """Parse a grid written as ``ROWSxCOLS``."""
+        """Parse a grid written as ``ROWSxCOLS``.
+
+        Args:
+            value: Text such as ``"4x2"``.
+
+        Returns:
+            The validated process grid.
+
+        Raises:
+            ValueError: If the text does not contain two positive dimensions.
+        """
         try:
             rows, cols = (int(part) for part in value.lower().split("x", 1))
         except (TypeError, ValueError) as exc:
@@ -41,16 +56,22 @@ class ProcessGrid:
 
     @property
     def processes(self) -> int:
-        """Return the number of participating GPU processes."""
+        """Return the total number of participating GPU processes."""
         return self.rows * self.cols
 
     def __str__(self) -> str:
+        """Return the grid in the command-line ``ROWSxCOLS`` form."""
         return f"{self.rows}x{self.cols}"
 
 
 @dataclass(frozen=True)
 class BenchmarkConfig:
-    """Static hardware and sweep configuration loaded from TOML."""
+    """Hardware, case-selection, execution, and Slurm settings from TOML.
+
+    The configuration is shared by the planner, the per-case runner, and the
+    submission command so the requested resource shape matches the benchmark
+    assumptions.
+    """
 
     gpu_name: str
     visible_memory_mib: int
@@ -71,7 +92,19 @@ class BenchmarkConfig:
 
     @classmethod
     def load(cls, path: str | Path) -> "BenchmarkConfig":
-        """Load and validate a benchmark configuration file."""
+        """Load and validate a benchmark configuration file.
+
+        Args:
+            path: TOML file containing ``hardware``, ``sweep``, ``execution``,
+                and ``slurm`` sections.
+
+        Returns:
+            A validated immutable configuration.
+
+        Raises:
+            KeyError: If a required configuration section or key is absent.
+            ValueError: If the loaded values are inconsistent.
+        """
         with Path(path).open("rb") as stream:
             raw = tomllib.load(stream)
         hardware, sweep = raw["hardware"], raw["sweep"]
@@ -98,7 +131,12 @@ class BenchmarkConfig:
         return config
 
     def validate(self) -> None:
-        """Reject inconsistent configurations before submitting jobs."""
+        """Reject values that cannot describe a supported benchmark suite.
+
+        Raises:
+            ValueError: If hardware resources, dtypes, solvers, run counts, or
+                process grids are incompatible with the benchmark runner.
+        """
         if (
             self.visible_memory_mib < 1
             or self.gpus_per_node < 1
@@ -123,18 +161,30 @@ class BenchmarkConfig:
 
     @property
     def visible_bytes_per_gpu(self) -> int:
-        """Return scheduler-visible device memory in bytes."""
+        """Return the GPU memory reported by the scheduler, in bytes."""
         return self.visible_memory_mib * 1024**2
 
     @property
     def allocator_budget_per_gpu(self) -> int:
-        """Return the configured VMM allocator budget per GPU."""
+        """Return the configured JAX allocator budget per GPU, in bytes."""
         return floor(self.visible_bytes_per_gpu * self.allocator_fraction)
 
 
 @dataclass(frozen=True)
 class MemoryEstimate:
-    """Known per-GPU allocations for one benchmark case."""
+    """Known per-GPU allocations for one benchmark case.
+
+    cuSOLVERMp workspace is excluded because the library chooses that size at
+    runtime. The fields describe only allocations that the benchmark can
+    calculate before execution.
+
+    Attributes:
+        local_matrix_bytes: Local shard of the input matrix.
+        rhs_capacity_bytes: Tile-aligned right-hand-side work capacity.
+        redistribution_scratch_bytes: Three native redistribution buffers.
+        pivot_bytes: LU pivot indices, or zero for Cholesky.
+        allocator_budget_bytes: VMM budget available to the process.
+    """
 
     local_matrix_bytes: int
     rhs_capacity_bytes: int
@@ -144,6 +194,7 @@ class MemoryEstimate:
 
     @property
     def known_total_bytes(self) -> int:
+        """Return the sum of all allocations known before the solver runs."""
         return sum(
             (
                 self.local_matrix_bytes,
@@ -155,12 +206,18 @@ class MemoryEstimate:
 
     @property
     def known_budget_fraction(self) -> float:
+        """Return the known allocation as a fraction of the VMM budget."""
         return self.known_total_bytes / self.allocator_budget_bytes
 
 
 @dataclass(frozen=True)
 class BenchmarkCase:
-    """One fresh-process benchmark case."""
+    """One solver, dtype, grid, matrix-size, and tile-size measurement.
+
+    A case is the unit executed in a fresh ``srun`` process group. Its matrix
+    dimension is required to be tile-aligned so the input matrix needs no
+    JAXMg padding.
+    """
 
     routine: str
     dtype: str
@@ -170,6 +227,7 @@ class BenchmarkCase:
 
     @property
     def case_id(self) -> str:
+        """Return the stable filename-safe identifier used for logs and JSON."""
         return (
             f"{self.routine}__{self.dtype}__g{self.grid}__"
             f"n{self.matrix_size}__t{self.tile_size}"
@@ -177,15 +235,26 @@ class BenchmarkCase:
 
     @property
     def alignment_quantum(self) -> int:
-        """Smallest N increment avoiding distributed matrix padding."""
+        """Return the smallest valid increment of ``N`` for this tile and grid."""
         return self.tile_size * lcm(self.grid.rows, self.grid.cols)
 
     @property
     def needs_matrix_padding(self) -> bool:
+        """Return whether this case would require input matrix padding."""
         return self.matrix_size % self.alignment_quantum != 0
 
     def estimate_memory(self, config: BenchmarkConfig) -> MemoryEstimate:
-        """Estimate known per-rank matrix, RHS, scratch, and pivot storage."""
+        """Estimate the known per-process memory required by this case.
+
+        Args:
+            config: Hardware and allocator settings for the target machine.
+
+        Returns:
+            Matrix, RHS, redistribution, pivot, and allocator-budget values.
+
+        Raises:
+            ValueError: If the matrix dimension requires padding.
+        """
         if self.needs_matrix_padding:
             raise ValueError(f"case {self.case_id} requires matrix padding")
         itemsize = DTYPE_BYTES[self.dtype]
@@ -205,7 +274,14 @@ class BenchmarkCase:
         )
 
     def to_dict(self, config: BenchmarkConfig) -> dict[str, object]:
-        """Return a self-contained record of the case and its memory estimate."""
+        """Return JSON-ready metadata for this case and its memory estimate.
+
+        Args:
+            config: Hardware and allocator settings for the target machine.
+
+        Returns:
+            A flat dictionary suitable for a benchmark result record.
+        """
         memory = self.estimate_memory(config)
         return {
             "case_id": self.case_id,
@@ -234,7 +310,15 @@ class BenchmarkCase:
 
 
 def _round_up_to_multiple(value: int, multiple: int) -> int:
-    """Round a baseline dimension upwards to a valid no-padding dimension."""
+    """Round a baseline dimension upwards to a valid no-padding dimension.
+
+    Args:
+        value: Requested matrix dimension.
+        multiple: Required positive alignment increment.
+
+    Returns:
+        The smallest multiple of ``multiple`` not smaller than ``value``.
+    """
     return (value + multiple - 1) // multiple * multiple
 
 
@@ -249,6 +333,16 @@ def _near_limit_sizes(
 
     This is a guide for the sweep, not a promise that a case fits. The native
     cuSOLVERMp workspace is routine-specific and cannot be known in advance.
+
+    Args:
+        config: Hardware and allocator settings.
+        dtype: Element dtype used by the matrix.
+        grid: Distributed process grid.
+        tile_size: cuSOLVERMp tile width.
+
+    Returns:
+        Aligned dimensions at the requested fractions of the matrix-only
+        allocator limit.
     """
     matrix_limit = floor(
         sqrt(config.allocator_budget_per_gpu * grid.processes / DTYPE_BYTES[dtype])
@@ -271,6 +365,15 @@ def planned_sizes(
 
     The shared baseline covers small and medium problems. Near the expected
     memory limit, the configured fractions give a more detailed sweep.
+
+    Args:
+        config: Hardware and allocator settings.
+        dtype: Element dtype used by the matrix.
+        grid: Distributed process grid.
+        tile_size: cuSOLVERMp tile width.
+
+    Returns:
+        Sorted no-padding matrix dimensions for this configuration.
     """
     quantum = tile_size * lcm(grid.rows, grid.cols)
     near_limit = {
@@ -295,7 +398,19 @@ def planned_sizes(
 def iter_cases(config: BenchmarkConfig, *, routines: Iterable[str] | None = None,
                dtypes: Iterable[str] | None = None,
                grids: Iterable[ProcessGrid] | None = None) -> Iterable[BenchmarkCase]:
-    """Yield configured cases in deterministic order."""
+    """Yield configured cases in a reproducible order.
+
+    Args:
+        config: Source configuration for routine, dtype, grid, tile, and size
+            selections.
+        routines: Optional subset of configured solver names.
+        dtypes: Optional subset of configured dtype names.
+        grids: Optional subset of configured process grids.
+
+    Yields:
+        One no-padding ``BenchmarkCase`` at a time, ordered by solver, dtype,
+        grid, tile width, and matrix size.
+    """
     for routine in tuple(routines or config.routines):
         for dtype in tuple(dtypes or config.dtypes):
             for grid in tuple(grids or config.grids):

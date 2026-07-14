@@ -12,6 +12,11 @@ from benchmark.cusolvermp.model import ProcessGrid
 
 
 def _arguments() -> argparse.Namespace:
+    """Read the completed solver, dtype, and grid to plot.
+
+    Returns:
+        Parsed result root, case filters, and optional output PNG path.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", default="results")
     parser.add_argument("--routine", choices=("potrs", "lu_solve"), required=True)
@@ -22,6 +27,7 @@ def _arguments() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Plot warm median timing against matrix dimension for every tile size."""
     args = _arguments()
     result_dir = (
         Path(args.output_root) / "cases" / args.routine / args.dtype / str(args.grid)

@@ -9,6 +9,11 @@ from pathlib import Path
 
 
 def _arguments() -> argparse.Namespace:
+    """Read locations for case JSON records and the two summary tables.
+
+    Returns:
+        Parsed input root plus CSV and JSONL output paths.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", default="results")
     parser.add_argument("--csv", default="results/summary.csv")
@@ -17,6 +22,7 @@ def _arguments() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Read all case JSON files and write combined CSV and JSONL summaries."""
     args = _arguments()
     records = []
     for path in sorted((Path(args.output_root) / "cases").rglob("*.json")):
