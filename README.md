@@ -1,128 +1,139 @@
-# JAXMg Benchmark
+# JAXMg Benchmarks
 
-This repository benchmarks the distributed `jaxmg.potrs` and
-`jaxmg.lu_solve` APIs backed by cuSOLVERMp. The suite uses one Python process
-per GPU and supports 1-4 Isambard-AI nodes (4-16 GPUs).
+This repository measures the distributed `jaxmg.potrs` and `jaxmg.lu_solve`
+solvers backed by cuSOLVERMp. It is written for the supported execution model:
+one Python process per GPU.
 
-## Installation
+Each benchmark case is defined by:
 
-Install the JAXMg wheel built from the target branch, then install the Python
-benchmark dependencies that match its pinned CUDA/JAX release:
+- the solver (`potrs` or `lu_solve`);
+- the data type;
+- a two-dimensional GPU process grid;
+- the matrix dimension `N`;
+- the tile width `T_A`.
 
-```bash
-# Create and activate a virtual environment (optional but recommended)
-python -m venv .venv
-source .venv/bin/activate
+The default Isambard configuration covers 4, 8, 12, and 16 GPUs, the grids
+listed in `configs/isambard_gh200.toml`, tile widths from 256 to 4096, and all
+four supported real and complex dtypes.
 
-# JAXMg's cuSOLVERMp backend currently targets CUDA 12 / JAX 0.10.1.
-pip install -r requirements_cusolvermp_cuda12.txt
-```
+## What A Case Measures
 
-## cuSOLVERMp suite
+For every case, the runner:
 
-The default Isambard configuration covers:
+1. builds a distributed diagonal system outside the timed region;
+2. runs one cold solve, including compilation;
+3. runs three warm solves using the same compiled configuration;
+4. validates the solution and native status after every solve;
+5. writes one JSON result and one combined log.
 
-- `potrs` and `lu_solve`;
-- `float32`, `float64`, `complex64`, and `complex128`;
-- tile sizes 256, 512, 1024, 2048, and 4096;
-- 4x1, 2x2, 8x1, 4x2, 12x1, 6x2, 4x3, 16x1, 8x2, and 4x4 process grids;
-- one cold solve and three warm solves per case;
-- baseline matrix sizes plus a denser sweep from 85% to 100% of the raw
-  distributed input-matrix capacity.
-
-Every `(routine, dtype, grid, N, T_A)` case is launched as a fresh `srun`
-process group. A failed or out-of-memory case therefore cannot contaminate
-later cases. Within that process group, all four solves use one compiled JAX
-configuration, so the three warm measurements are genuine cache-reuse runs.
-Input creation and result validation are excluded from solver timings.
-
-The planner only emits dimensions satisfying
+Each `N` is chosen so the input matrix is already aligned to the selected grid
+and tile size. The benchmark therefore does not exercise JAXMg's padding path.
+The rule is:
 
 ```text
 N % (T_A * lcm(process_rows, process_cols)) == 0
 ```
 
-so the large input matrix requires no tile-alignment padding. The single RHS
-still has the small internal capacity needed to route an `N x 1` input across
-the selected process grid.
+The benchmark times only the solver calls. Matrix construction and validation
+are deliberately outside those timings.
 
-### Isambard setup
+Every case is launched in its own `srun` process group. This is important near
+the memory limit: a CUDA or NCCL out-of-memory error cannot leave state behind
+for the next case.
 
-The Slurm wrapper expects a JAXMg environment and optionally an editable
-JAXMg source checkout:
+## Installation
+
+Install a JAXMg CUDA 12 wheel or editable checkout, then install the matching
+Python dependencies:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements_cusolvermp_cuda12.txt
+```
+
+The Isambard Slurm wrapper expects:
 
 ```bash
 export JAXMG_BENCHMARK_VENV=/projects/u6my/users/$USER/JAXMG/venvs/jaxmg-cu12
 export JAXMG_SOURCE_ROOT=/projects/u6my/users/$USER/JAXMG/jaxmg
 ```
 
-For a new environment, install the target branch's Jenkins wheel (or its Bazel
-build) and then install `requirements_cusolvermp_cuda12.txt`.
+`JAXMG_SOURCE_ROOT` is optional. When set, it lets the benchmark import that
+source checkout instead of the wheel installed in the virtual environment.
 
-It sets the validated allocator configuration before Python imports JAX:
+The wrapper uses the allocator settings that have been validated on Isambard:
 
 ```bash
 export XLA_PYTHON_CLIENT_ALLOCATOR=vmm
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.99
+export NCCL_CUMEM_ENABLE=0
 ```
 
-The hardware model uses the 97,871 MiB visible on each Isambard GH200 GPU,
-giving a 94.622 GiB VMM budget per process. Memory-frontier points are targets,
-not guaranteed successes: cuSOLVERMp workspace is opaque and depends on the
-routine, dtype, grid, matrix size, and tile size.
+## Plan And Submit
 
-### Review and submit
-
-First print the complete submission manifest without changing Slurm state:
+First inspect the jobs and their case counts. This does not submit anything:
 
 ```bash
 python -m benchmark.cusolvermp.submit
 ```
 
-Filters can select a small checkpoint:
+Restrict the output to one solver, dtype, and grid while checking a smaller
+part of the sweep:
 
 ```bash
 python -m benchmark.cusolvermp.submit \
   --routine potrs --dtype float32 --grid 4x1
 ```
 
-After reviewing the generated command and case count, submit that selection:
+Add `--submit` after reviewing the commands:
 
 ```bash
 python -m benchmark.cusolvermp.submit \
   --routine potrs --dtype float32 --grid 4x1 --submit
 ```
 
-Each logical Slurm job covers every configured tile and matrix size for one
-routine, dtype, and process grid. Completed cases are skipped on restart;
-recorded failures are retried by the supplied Slurm wrapper.
+One Slurm job runs every requested tile width and matrix size for that solver,
+dtype, and grid. The outer job reserves complete nodes; the suite runner then
+uses all four GPUs and their matching CPU cores on each node for every `srun`.
 
-### Results
+Completed cases are skipped when a suite is rerun. The Slurm wrapper retries
+recorded failures, which is useful when a targeted memory-limit sweep is
+adjusted after an out-of-memory result.
 
-Each case writes one atomic JSON record under `results/cases` and a separate
-combined stdout/stderr log under `results/logs`. Records contain cold and warm
-timings, the warm median, validation error, solver status, topology, allocator
-configuration, and analytical known-buffer sizes. No `nvidia-smi` polling is
-performed during a benchmark.
+## Results
 
-Create convenient summary tables with:
+Results are written below the chosen output root:
+
+```text
+results/
+  cases/<solver>/<dtype>/<grid>/*.json
+  logs/<solver>/<dtype>/<grid>/*.log
+```
+
+Each JSON record includes cold and warm timings, validation error, native
+status words, allocator settings, topology, and the known JAXMg allocations.
+The estimate includes the local input matrix, RHS capacity, redistribution
+scratch, and LU pivots. cuSOLVERMp workspace is not included because it is
+allocated internally by that library.
+
+Create a single table from all completed records:
 
 ```bash
 python -m benchmark.cusolvermp.collect
 ```
 
-This produces `results/summary.csv` and `results/summary.jsonl`.
-
-Plot one completed configuration with:
+This writes `results/summary.csv` and `results/summary.jsonl`. Plot one solver,
+dtype, and grid with:
 
 ```bash
 python -m benchmark.cusolvermp.plot \
   --routine potrs --dtype float32 --grid 4x1
 ```
 
-### Planner tests
+## Tests
 
-The CPU-only tests verify alignment and analytical memory accounting:
+The CPU-only tests check the case-selection and memory calculations:
 
 ```bash
 python -m unittest discover -s tests -v

@@ -9,9 +9,14 @@ from benchmark.cusolvermp.model import (
     ProcessGrid,
     planned_sizes,
 )
+from benchmark.cusolvermp.run_suite import _selected_sizes, _srun_command
 
 
 CONFIG = Path(__file__).parents[1] / "configs" / "isambard_gh200.toml"
+LIMIT_CONFIGS = (
+    Path(__file__).parents[1] / "configs" / "isambard_gh200_limit_probe.toml",
+    Path(__file__).parents[1] / "configs" / "isambard_gh200_limit_probe_8g.toml",
+)
 
 
 class ModelTests(unittest.TestCase):
@@ -27,6 +32,14 @@ class ModelTests(unittest.TestCase):
             94.6216,
             places=3,
         )
+        self.assertEqual(self.config.suite_walltime, "24:00:00")
+        self.assertEqual(self.config.suite_memory, "400G")
+
+    def test_all_configurations_use_the_common_schema(self):
+        for path in (CONFIG, *LIMIT_CONFIGS):
+            config = BenchmarkConfig.load(path)
+            self.assertTrue(config.suite_walltime)
+            self.assertTrue(config.suite_memory)
 
     def test_alignment_quantum_uses_grid_lcm(self):
         case = BenchmarkCase("potrs", "float32", ProcessGrid(6, 2), 24576, 1024)
@@ -66,6 +79,26 @@ class ModelTests(unittest.TestCase):
         self.assertTrue({327680, 393216, 458752, 524288}.issubset(sizes))
         self.assertEqual(sizes[-8], 586752)
         self.assertNotIn(589824, sizes)
+
+    def test_explicit_sizes_drop_padding_cases_per_tile(self):
+        class Arguments:
+            routine = "potrs"
+            dtype = "float32"
+            grid = ProcessGrid(4, 1)
+            matrix_size = [4096, 5000]
+
+        self.assertEqual(_selected_sizes(Arguments(), self.config, tile_size=1024), (4096,))
+
+    def test_case_command_uses_the_reserved_cpu_share(self):
+        case = BenchmarkCase("potrs", "float32", ProcessGrid(4, 1), 4096, 1024)
+        command = _srun_command(
+            case=case,
+            config=self.config,
+            config_path=CONFIG,
+            output=Path("results/example.json"),
+        )
+        self.assertEqual(command[command.index("--cpus-per-task") + 1], "72")
+        self.assertEqual(command[command.index("--ntasks") + 1], "4")
 
 
 if __name__ == "__main__":

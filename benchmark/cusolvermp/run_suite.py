@@ -1,4 +1,8 @@
-"""Run one logical benchmark suite as isolated ``srun`` case steps."""
+"""Run every selected case for one solver, dtype, and process grid.
+
+Each case receives its own ``srun`` process group. This keeps an out-of-memory
+failure or an NCCL error from affecting the next matrix size.
+"""
 
 from __future__ import annotations
 
@@ -28,7 +32,11 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--matrix-size", type=int, action="append")
     parser.add_argument("--output-root", default="results")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--retry-failures", action="store_true")
+    parser.add_argument(
+        "--retry-failures",
+        action="store_true",
+        help="rerun cases with an existing failed result file",
+    )
     return parser.parse_args()
 
 
@@ -41,6 +49,7 @@ def _existing_pass(path: Path) -> bool:
 
 def _write_failure(path: Path, case: BenchmarkCase, returncode: int | str,
                    elapsed: float) -> None:
+    """Record a failed case in the same place as successful JSON records."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
@@ -63,6 +72,125 @@ def _write_failure(path: Path, case: BenchmarkCase, returncode: int | str,
     )
 
 
+def _selected_tiles(args: argparse.Namespace, config: BenchmarkConfig) -> tuple[int, ...]:
+    """Return requested tile sizes after checking the configuration."""
+    tiles = tuple(args.tile_size or config.tiles)
+    if set(tiles) - set(config.tiles):
+        raise ValueError("every selected tile size must be configured")
+    return tiles
+
+
+def _selected_sizes(
+    args: argparse.Namespace,
+    config: BenchmarkConfig,
+    *,
+    tile_size: int,
+) -> tuple[int, ...]:
+    """Return either the standard size sweep or explicit aligned dimensions."""
+    if not args.matrix_size:
+        return planned_sizes(
+            config,
+            dtype=args.dtype,
+            grid=args.grid,
+            tile_size=tile_size,
+        )
+
+    sizes = tuple(
+        sorted(
+            size
+            for size in set(args.matrix_size)
+            if not BenchmarkCase(
+                args.routine, args.dtype, args.grid, size, tile_size
+            ).needs_matrix_padding
+        )
+    )
+    return sizes
+
+
+def _selected_cases(
+    args: argparse.Namespace, config: BenchmarkConfig
+) -> list[BenchmarkCase]:
+    """Build the ordered case list printed before the suite starts."""
+    cases = []
+    for tile_size in _selected_tiles(args, config):
+        sizes = _selected_sizes(args, config, tile_size=tile_size)
+        cases.extend(
+            BenchmarkCase(args.routine, args.dtype, args.grid, size, tile_size)
+            for size in sizes
+        )
+    if not cases:
+        raise ValueError("no requested matrix sizes fit the selected grid and tiles")
+    return cases
+
+
+def _srun_command(
+    *,
+    case: BenchmarkCase,
+    config: BenchmarkConfig,
+    config_path: Path,
+    output: Path,
+) -> list[str]:
+    """Build the ``srun`` command for a single fresh benchmark case."""
+    nodes = case.grid.processes // config.gpus_per_node
+    return [
+        "srun",
+        "--nodes",
+        str(nodes),
+        "--ntasks",
+        str(case.grid.processes),
+        "--ntasks-per-node",
+        str(config.gpus_per_node),
+        # Keep the host cores assigned by the outer Slurm allocation. NCCL and
+        # the JAX runtime both need CPU progress while CUDA work is in flight.
+        "--cpus-per-task",
+        str(config.cpus_per_gpu),
+        sys.executable,
+        "-u",
+        "-m",
+        "benchmark.cusolvermp.run_case",
+        "--config",
+        str(config_path),
+        "--routine",
+        case.routine,
+        "--dtype",
+        case.dtype,
+        "--grid",
+        str(case.grid),
+        "--matrix-size",
+        str(case.matrix_size),
+        "--tile-size",
+        str(case.tile_size),
+        "--output",
+        str(output),
+    ]
+
+
+def _run_case(
+    *,
+    command: list[str],
+    output: Path,
+    log_path: Path,
+    case: BenchmarkCase,
+    timeout_seconds: int,
+) -> None:
+    """Run one case, preserving its combined log and a failure JSON if needed."""
+    started = time.perf_counter()
+    try:
+        with log_path.open("w", encoding="utf-8") as log:
+            completed = subprocess.run(
+                command,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                env=os.environ.copy(),
+                timeout=timeout_seconds,
+                check=False,
+            )
+        if completed.returncode != 0 and not _existing_pass(output):
+            _write_failure(output, case, completed.returncode, time.perf_counter() - started)
+    except subprocess.TimeoutExpired:
+        _write_failure(output, case, "timeout", time.perf_counter() - started)
+
+
 def main() -> None:
     args = _arguments()
     config = BenchmarkConfig.load(args.config)
@@ -78,43 +206,7 @@ def main() -> None:
     result_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    selected_tiles = tuple(args.tile_size or config.tiles)
-    if set(selected_tiles) - set(config.tiles):
-        raise ValueError("every selected tile size must be configured")
-    planned_by_tile = {
-        tile: planned_sizes(config, dtype=args.dtype, grid=args.grid, tile_size=tile)
-        for tile in selected_tiles
-    }
-    selected_sizes = set(args.matrix_size or ())
-    if selected_sizes:
-        # An explicit matrix-size request is allowed outside the default ladder
-        # when it is a valid no-padding case for the selected tile size. This
-        # supports targeted memory-limit checks without mutating the standard
-        # reproducible sweep configuration.
-        planned_by_tile = {
-            tile: tuple(
-                sorted(
-                    size
-                    for size in selected_sizes
-                    if not BenchmarkCase(
-                        args.routine, args.dtype, args.grid, size, tile
-                    ).needs_matrix_padding
-                )
-            )
-            for tile in selected_tiles
-        }
-        planned_by_tile = {
-            tile: sizes for tile, sizes in planned_by_tile.items() if sizes
-        }
-        if not planned_by_tile:
-            raise ValueError(
-                "no selected matrix size is tile-aligned for the selected grid"
-            )
-    cases = [
-        BenchmarkCase(args.routine, args.dtype, args.grid, size, tile)
-        for tile, sizes in planned_by_tile.items()
-        for size in sizes
-    ]
+    cases = _selected_cases(args, config)
     print(f"suite={suite} cases={len(cases)}", flush=True)
     for index, case in enumerate(cases, start=1):
         output = result_dir / f"{case.case_id}.json"
@@ -124,37 +216,23 @@ def main() -> None:
         if output.exists() and not args.retry_failures:
             print(f"[{index}/{len(cases)}] skip recorded failure {case.case_id}", flush=True)
             continue
-        command = [
-            "srun", "--nodes", str(case.grid.processes // config.gpus_per_node),
-            "--ntasks", str(case.grid.processes), "--ntasks-per-node", str(config.gpus_per_node),
-            # Distributed CUDA/NCCL work needs host progress threads.  Assign
-            # the per-GPU CPU share reserved by the outer Slurm allocation.
-            "--cpus-per-task", str(config.cpus_per_gpu), sys.executable, "-u", "-m",
-            "benchmark.cusolvermp.run_case", "--config", str(Path(args.config).resolve()),
-            "--routine", case.routine, "--dtype", case.dtype, "--grid", str(case.grid),
-            "--matrix-size", str(case.matrix_size), "--tile-size", str(case.tile_size),
-            "--output", str(output.resolve()),
-        ]
+        command = _srun_command(
+            case=case,
+            config=config,
+            config_path=Path(args.config).resolve(),
+            output=output.resolve(),
+        )
         print(f"[{index}/{len(cases)}] {' '.join(command)}", flush=True)
         if args.dry_run:
             continue
-        started = time.perf_counter()
         log_path = log_dir / f"{case.case_id}.log"
-        try:
-            with log_path.open("w", encoding="utf-8") as log:
-                completed = subprocess.run(
-                    command,
-                    stdout=log,
-                    stderr=subprocess.STDOUT,
-                    env=os.environ.copy(),
-                    timeout=config.case_timeout_seconds,
-                    check=False,
-                )
-            if completed.returncode != 0 and not _existing_pass(output):
-                _write_failure(output, case, completed.returncode,
-                               time.perf_counter() - started)
-        except subprocess.TimeoutExpired:
-            _write_failure(output, case, "timeout", time.perf_counter() - started)
+        _run_case(
+            command=command,
+            output=output,
+            log_path=log_path,
+            case=case,
+            timeout_seconds=config.case_timeout_seconds,
+        )
 
 
 if __name__ == "__main__":

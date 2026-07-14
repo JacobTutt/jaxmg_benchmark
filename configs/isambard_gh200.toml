@@ -21,3 +21,9 @@ frontier_fractions = [0.85, 0.90, 0.92, 0.94, 0.96, 0.98, 0.99, 1.00]
 cold_runs = 1
 warm_runs = 3
 case_timeout_seconds = 21600
+
+[slurm]
+# One outer job runs every selected matrix size and tile size for a single
+# solver, dtype, and process-grid choice.
+suite_walltime = "24:00:00"
+suite_memory = "400G"

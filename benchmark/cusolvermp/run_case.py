@@ -1,9 +1,8 @@
-"""Run one distributed JAXMg solver benchmark in a fresh process group.
+"""Run one JAXMg benchmark case.
 
-This module is launched by ``srun`` with one Python process per GPU.  Input
-construction and validation are outside the timed region.  The first solver
-call records compilation plus execution; the next three calls reuse the same
-compiled configuration and report warm execution time.
+``run_suite.py`` starts this module once per case with ``srun``. Each Python
+process owns one GPU. Input creation and validation are not timed. The first
+call includes compilation; the remaining calls use the same compiled solver.
 """
 
 from __future__ import annotations
@@ -38,7 +37,11 @@ def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
     parser.add_argument("--routine", choices=("potrs", "lu_solve"), required=True)
-    parser.add_argument("--dtype", choices=("float32", "float64", "complex64", "complex128"), required=True)
+    parser.add_argument(
+        "--dtype",
+        choices=("float32", "float64", "complex64", "complex128"),
+        required=True,
+    )
     parser.add_argument("--grid", type=ProcessGrid.parse, required=True)
     parser.add_argument("--matrix-size", type=int, required=True)
     parser.add_argument("--tile-size", type=int, required=True)
@@ -84,7 +87,7 @@ def _make_mesh(grid: ProcessGrid) -> Mesh:
 def _make_input_factory(
     *, matrix_size: int, dtype: jnp.dtype, mesh: Mesh
 ):
-    """Compile deterministic diagonal A and vector B creation outside timing."""
+    """Create the diagonal test system outside the timed solver call."""
     a_sharding = NamedSharding(mesh, P("pr", "pc"))
     b_sharding = NamedSharding(mesh, P("pr", None))
 
@@ -97,7 +100,8 @@ def _make_input_factory(
     return jax.jit(make_inputs, out_shardings=(a_sharding, b_sharding))
 
 
-def _synchronize_inputs(a: jax.Array, b: jax.Array) -> None:
+def _wait_for_inputs(a: jax.Array, b: jax.Array) -> None:
+    """Ensure the input factory has completed before starting the timer."""
     for leaf in jax.tree_util.tree_leaves((a, b)):
         leaf.block_until_ready()
 
@@ -122,9 +126,9 @@ def _validate(
     return maximum_error, rank_codes
 
 
-def _run(args: argparse.Namespace) -> dict[str, object]:
-    """Execute the configured cold and warm solver calls."""
-    if args.routine == "potrs":
+def _solver_for(routine: str):
+    """Load the requested public solver and its per-rank status layout."""
+    if routine == "potrs":
         from jaxmg import potrs as solver
         from jaxmg._cusolvermp_status import (
             _CUSOLVERMP_POTRS_STATUS_SIZE as status_size,
@@ -134,11 +138,11 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
         from jaxmg._cusolvermp_status import (
             _CUSOLVERMP_LU_SOLVE_STATUS_SIZE as status_size,
         )
+    return solver, status_size
 
-    config = BenchmarkConfig.load(args.config)
-    case = BenchmarkCase(
-        args.routine, args.dtype, args.grid, args.matrix_size, args.tile_size
-    )
+
+def _check_case(case: BenchmarkCase) -> None:
+    """Check the supported MPMD layout before allocating a matrix."""
     if case.needs_matrix_padding:
         raise ValueError(
             f"{case.case_id} needs matrix padding; N must be divisible by "
@@ -149,7 +153,60 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
             f"expected {case.grid.processes} processes, got {jax.process_count()}"
         )
     if len(jax.local_devices(backend="gpu")) != 1:
-        raise RuntimeError("JAXMg requires exactly one visible GPU per Python process")
+        raise RuntimeError("JAXMg requires one visible GPU per Python process")
+
+
+def _phase(iteration: int, cold_runs: int, warm_runs: int) -> tuple[str, int, int]:
+    """Return a readable phase label and one-based counter for an iteration."""
+    if iteration < cold_runs:
+        return "cold", iteration + 1, cold_runs
+    return "warm", iteration - cold_runs + 1, warm_runs
+
+
+def _solve_once(
+    *,
+    solver,
+    a: jax.Array,
+    b: jax.Array,
+    tile_size: int,
+    mesh: Mesh,
+) -> tuple[jax.Array, jax.Array, float]:
+    """Run one solver call and report the slowest rank's elapsed time."""
+    started = time.perf_counter()
+    out, status = solver(
+        a,
+        b,
+        T_A=tile_size,
+        mesh=mesh,
+        matrix_specs=P("pr", "pc"),
+        return_status=True,
+        pad=True,
+    )
+    out.block_until_ready()
+    status.block_until_ready()
+    return out, status, _global_max_seconds(time.perf_counter() - started)
+
+
+def _package_versions() -> dict[str, str | None]:
+    """Record package versions with the result for later comparison."""
+    versions: dict[str, str | None] = {}
+    for package in ("jax", "jaxlib", "jaxmg", "nvidia-cusolvermp-cu12"):
+        try:
+            versions[package] = importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError:
+            versions[package] = None
+    return versions
+
+
+def _run(args: argparse.Namespace) -> dict[str, object]:
+    """Create inputs, time one cold and several warm calls, then save a result."""
+    solver, status_size = _solver_for(args.routine)
+
+    config = BenchmarkConfig.load(args.config)
+    case = BenchmarkCase(
+        args.routine, args.dtype, args.grid, args.matrix_size, args.tile_size
+    )
+    _check_case(case)
 
     dtype = getattr(jnp, case.dtype)
     mesh = _make_mesh(case.grid)
@@ -159,30 +216,27 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
     timings: list[float] = []
     maximum_error = 0.0
     rank_codes: list[int] = []
-    total_runs = config.cold_runs + config.warm_runs
-    for iteration in range(total_runs):
-        phase = "cold" if iteration < config.cold_runs else "warm"
-        phase_iteration = iteration + 1 if phase == "cold" else iteration - config.cold_runs + 1
-        phase_total = config.cold_runs if phase == "cold" else config.warm_runs
-        if jax.process_index() == 0:
-            print(f"{case.case_id}: {phase} {phase_iteration}/{phase_total} start", flush=True)
-        a, b = make_inputs()
-        _synchronize_inputs(a, b)
-        multihost_utils.sync_global_devices(f"{case.case_id}_{iteration}_start")
-        started = time.perf_counter()
-        out, status = solver(
-            a,
-            b,
-            T_A=case.tile_size,
-            mesh=mesh,
-            matrix_specs=P("pr", "pc"),
-            return_status=True,
-            pad=True,
+    for iteration in range(config.cold_runs + config.warm_runs):
+        phase, phase_iteration, phase_total = _phase(
+            iteration, config.cold_runs, config.warm_runs
         )
-        out.block_until_ready()
-        status.block_until_ready()
+        if jax.process_index() == 0:
+            print(
+                f"{case.case_id}: {phase} {phase_iteration}/{phase_total} start",
+                flush=True,
+            )
+        a, b = make_inputs()
+        _wait_for_inputs(a, b)
+        multihost_utils.sync_global_devices(f"{case.case_id}_{iteration}_start")
+        out, status, elapsed = _solve_once(
+            solver=solver,
+            a=a,
+            b=b,
+            tile_size=case.tile_size,
+            mesh=mesh,
+        )
         multihost_utils.sync_global_devices(f"{case.case_id}_{iteration}_stop")
-        timings.append(_global_max_seconds(time.perf_counter() - started))
+        timings.append(elapsed)
         maximum_error, rank_codes = _validate(
             out=out, status=status, status_size=status_size, dtype_name=case.dtype
         )
@@ -197,12 +251,6 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
 
     cold = timings[: config.cold_runs]
     warm = timings[config.cold_runs :]
-    package_versions = {}
-    for package in ("jax", "jaxlib", "jaxmg", "nvidia-cusolvermp-cu12"):
-        try:
-            package_versions[package] = importlib.metadata.version(package)
-        except importlib.metadata.PackageNotFoundError:
-            package_versions[package] = None
     return {
         **case.to_dict(config),
         "status": "passed",
@@ -218,7 +266,7 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
         "max_abs_error": maximum_error,
         "native_status_codes": rank_codes,
         "jax_version": jax.__version__,
-        "package_versions": package_versions,
+        "package_versions": _package_versions(),
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
         "slurm_node_list": os.environ.get("SLURM_JOB_NODELIST"),
     }
@@ -226,17 +274,14 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
 
 def main() -> None:
     args = _arguments()
-    # Slurm supplies rank and coordinator metadata, while local_device_ids
-    # enforces the supported one-process-per-GPU execution model.
+    # Slurm supplies rank and coordinator metadata. This makes the one GPU
+    # assigned to each process explicit to JAX.
     local_id = int(os.environ.get("SLURM_LOCALID", "0"))
     jax.distributed.initialize(local_device_ids=[local_id])
     payload = _run(args)
 
-    # Keep every worker alive until its peers have completed validation.  An
-    # explicit jax.distributed.shutdown() adds a second internal barrier which
-    # can time out when near-limit device work finishes unevenly across ranks.
-    # Normal process teardown releases the distributed runtime after this
-    # benchmark-level completion barrier.
+    # Finish validation on every rank before rank zero writes the result.
+    # Normal process exit releases the distributed runtime.
     multihost_utils.sync_global_devices("jaxmg_benchmark_case_complete")
     if jax.process_index() == 0:
         _atomic_json(Path(args.output), payload)

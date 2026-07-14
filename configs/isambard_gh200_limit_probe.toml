@@ -21,3 +21,7 @@ warm_runs = 1
 # Native OOMs can leave peer ranks waiting in NCCL.  Bound each fresh srun so
 # one failure cannot prevent the following bracketing cases from running.
 case_timeout_seconds = 240
+
+[slurm]
+suite_walltime = "01:00:00"
+suite_memory = "400G"

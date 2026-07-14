@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Resource shape, wall time, and output paths are supplied by submit.py.
+# submit.py supplies the allocation, solver, dtype, grid, and output root.
 : "${JAXMG_BENCHMARK_VENV:?Set JAXMG_BENCHMARK_VENV to the JAXMg virtual environment}"
 : "${JAXMG_BENCHMARK_CONFIG:?Missing benchmark configuration}"
 : "${JAXMG_BENCHMARK_ROUTINE:?Missing routine}"
@@ -12,14 +12,14 @@ set -euo pipefail
 module load cray-python/3.11.7 cuda/12.6 gcc-native/14.2
 source "${JAXMG_BENCHMARK_VENV}/bin/activate"
 
-# An editable source checkout can override the wheel installed in the venv.
+# Use an editable checkout when requested; otherwise use the installed wheel.
 if [[ -n "${JAXMG_SOURCE_ROOT:-}" ]]; then
     export PYTHONPATH="${JAXMG_SOURCE_ROOT}/src:${SLURM_SUBMIT_DIR}:${PYTHONPATH:-}"
 else
     export PYTHONPATH="${SLURM_SUBMIT_DIR}:${PYTHONPATH:-}"
 fi
 
-# Include CUDA-wheel libraries and Isambard's NCCL/UCC installations.
+# Add CUDA wheel libraries and Isambard's NCCL/UCC libraries to the loader path.
 NVIDIA_LIBRARY_PATH="$(${JAXMG_BENCHMARK_VENV}/bin/python - <<'PY'
 from pathlib import Path
 import site
@@ -36,8 +36,8 @@ export LD_LIBRARY_PATH="${NVIDIA_LIBRARY_PATH}:/opt/nvidia/hpc_sdk/Linux_aarch64
 
 export XLA_PYTHON_CLIENT_ALLOCATOR=vmm
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.99
-# Isambard supports cuMem, but retain the proven conservative NCCL setting by
-# default. Users can override it explicitly when testing another runtime.
+# Keep the NCCL setting that has proved reliable on Isambard. It can still be
+# overridden by the submission environment when testing another runtime.
 export NCCL_CUMEM_ENABLE="${NCCL_CUMEM_ENABLE:-0}"
 export OMP_NUM_THREADS=1
 
@@ -46,8 +46,8 @@ if [[ -n "${JAXMG_BENCHMARK_TILE_SIZE:-}" ]]; then
     extra_args+=(--tile-size "${JAXMG_BENCHMARK_TILE_SIZE}")
 fi
 if [[ -n "${JAXMG_BENCHMARK_MATRIX_SIZES:-}" ]]; then
-    # Space-separated explicit sizes are useful for a tightly bracketed
-    # memory-limit probe.  run_suite still launches each case in a fresh srun.
+    # Explicit sizes are used for a small memory-limit sweep. Each still gets
+    # its own fresh srun process group.
     read -r -a matrix_sizes <<< "${JAXMG_BENCHMARK_MATRIX_SIZES}"
     for matrix_size in "${matrix_sizes[@]}"; do
         extra_args+=(--matrix-size "${matrix_size}")

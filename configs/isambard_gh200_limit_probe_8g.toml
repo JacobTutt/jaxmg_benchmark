@@ -22,3 +22,7 @@ warm_runs = 1
 # call near this frontier. Bound an OOM-induced peer-rank stall without
 # rejecting healthy cold-plus-warm cases.
 case_timeout_seconds = 1200
+
+[slurm]
+suite_walltime = "02:00:00"
+suite_memory = "400G"
