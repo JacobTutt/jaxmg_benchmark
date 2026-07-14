@@ -20,7 +20,10 @@ frontier_fractions = [0.85, 0.90, 0.92, 0.94, 0.96, 0.98, 0.99, 1.00]
 [execution]
 cold_runs = 1
 warm_runs = 3
-case_timeout_seconds = 21600
+# A case contains one cold and three warm solves. One hour leaves room for
+# four ~700-second solves and validation, while preventing a failed NCCL rank
+# from consuming most of the outer 24-hour allocation.
+case_timeout_seconds = 3600
 
 [slurm]
 # One outer job runs every selected matrix size and tile size for a single

@@ -39,7 +39,9 @@ are deliberately outside those timings.
 
 Every case is launched in its own `srun` process group. This is important near
 the memory limit: a CUDA or NCCL out-of-memory error cannot leave state behind
-for the next case.
+for the next case. The standard configuration gives a complete case one hour:
+enough for the cold call, three warm calls, and validation, without allowing a
+stalled rank to consume most of the outer allocation.
 
 ## Installation
 
