@@ -127,7 +127,9 @@ def main() -> None:
         command = [
             "srun", "--nodes", str(case.grid.processes // config.gpus_per_node),
             "--ntasks", str(case.grid.processes), "--ntasks-per-node", str(config.gpus_per_node),
-            "--cpus-per-task", "1", sys.executable, "-u", "-m",
+            # Distributed CUDA/NCCL work needs host progress threads.  Assign
+            # the per-GPU CPU share reserved by the outer Slurm allocation.
+            "--cpus-per-task", str(config.cpus_per_gpu), sys.executable, "-u", "-m",
             "benchmark.cusolvermp.run_case", "--config", str(Path(args.config).resolve()),
             "--routine", case.routine, "--dtype", case.dtype, "--grid", str(case.grid),
             "--matrix-size", str(case.matrix_size), "--tile-size", str(case.tile_size),

@@ -21,6 +21,7 @@ class ModelTests(unittest.TestCase):
 
     def test_isambard_allocator_budget(self):
         self.assertEqual(self.config.visible_memory_mib, 97871)
+        self.assertEqual(self.config.cpus_per_gpu, 72)
         self.assertAlmostEqual(
             self.config.allocator_budget_per_gpu / 1024**3,
             94.6216,

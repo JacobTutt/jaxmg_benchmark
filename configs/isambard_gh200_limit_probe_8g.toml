@@ -3,6 +3,7 @@ gpu_name = "NVIDIA GH200 120GB"
 visible_memory_mib = 97871
 allocator_fraction = 0.99
 gpus_per_node = 4
+cpus_per_gpu = 72
 
 [sweep]
 routines = ["potrs"]
@@ -17,6 +18,7 @@ frontier_fractions = [0.85]
 [execution]
 cold_runs = 1
 warm_runs = 1
-# Allow a genuine large distributed call to complete, but bound an OOM-induced
-# peer-rank stall so later fresh-process cases still execute.
-case_timeout_seconds = 480
+# Historical 8-GPU runs at T_A=256 take about nine minutes per cold or warm
+# call near this frontier. Bound an OOM-induced peer-rank stall without
+# rejecting healthy cold-plus-warm cases.
+case_timeout_seconds = 1200

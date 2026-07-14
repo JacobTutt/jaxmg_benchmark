@@ -51,7 +51,8 @@ def main() -> None:
                 command = [
                     "sbatch", "--job-name", job_name, "--nodes", str(nodes),
                     "--ntasks", str(nodes), "--ntasks-per-node", "1",
-                    "--cpus-per-task", "288", "--gres", "gpu:4", "--mem", "400G",
+                    "--cpus-per-task", str(config.gpus_per_node * config.cpus_per_gpu),
+                    "--gres", f"gpu:{config.gpus_per_node}", "--mem", "400G",
                     "--time", "24:00:00", "--output", "slurm-logs/%x-%j.out",
                     "--error", "slurm-logs/%x-%j.err", "--export",
                     (
@@ -76,4 +77,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

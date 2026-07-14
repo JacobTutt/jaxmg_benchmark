@@ -3,6 +3,7 @@ gpu_name = "NVIDIA GH200 120GB"
 visible_memory_mib = 97871
 allocator_fraction = 0.99
 gpus_per_node = 4
+cpus_per_gpu = 72
 
 [sweep]
 routines = ["potrs"]

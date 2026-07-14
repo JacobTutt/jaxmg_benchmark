@@ -61,6 +61,7 @@ class BenchmarkConfig:
     visible_memory_mib: int
     allocator_fraction: float
     gpus_per_node: int
+    cpus_per_gpu: int
     tiles: tuple[int, ...]
     dtypes: tuple[str, ...]
     routines: tuple[str, ...]
@@ -82,6 +83,7 @@ class BenchmarkConfig:
             visible_memory_mib=int(hardware["visible_memory_mib"]),
             allocator_fraction=float(hardware["allocator_fraction"]),
             gpus_per_node=int(hardware["gpus_per_node"]),
+            cpus_per_gpu=int(hardware["cpus_per_gpu"]),
             tiles=tuple(int(value) for value in sweep["tiles"]),
             dtypes=tuple(str(value) for value in sweep["dtypes"]),
             routines=tuple(str(value) for value in sweep["routines"]),
@@ -97,8 +99,12 @@ class BenchmarkConfig:
 
     def validate(self) -> None:
         """Reject inconsistent configurations before submitting jobs."""
-        if self.visible_memory_mib < 1 or self.gpus_per_node < 1:
-            raise ValueError("hardware memory and GPU count must be positive")
+        if (
+            self.visible_memory_mib < 1
+            or self.gpus_per_node < 1
+            or self.cpus_per_gpu < 1
+        ):
+            raise ValueError("hardware memory, GPU count, and CPUs per GPU must be positive")
         if not 0 < self.allocator_fraction <= 1:
             raise ValueError("allocator_fraction must be in (0, 1]")
         if set(self.dtypes) - set(DTYPE_BYTES):
