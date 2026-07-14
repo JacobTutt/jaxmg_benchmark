@@ -1,0 +1,22 @@
+[hardware]
+gpu_name = "NVIDIA GH200 120GB"
+visible_memory_mib = 97871
+allocator_fraction = 0.99
+gpus_per_node = 4
+
+[sweep]
+routines = ["potrs"]
+dtypes = ["float32"]
+tiles = [256]
+grids = ["8x1"]
+# Explicit sizes are provided by the submission; these fields retain the
+# common configuration schema used by the generic suite runner.
+baseline_sizes = [1024]
+frontier_fractions = [0.85]
+
+[execution]
+cold_runs = 1
+warm_runs = 1
+# Allow a genuine large distributed call to complete, but bound an OOM-induced
+# peer-rank stall so later fresh-process cases still execute.
+case_timeout_seconds = 480
