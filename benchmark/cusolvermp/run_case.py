@@ -219,13 +219,17 @@ def main() -> None:
     # enforces the supported one-process-per-GPU execution model.
     local_id = int(os.environ.get("SLURM_LOCALID", "0"))
     jax.distributed.initialize(local_device_ids=[local_id])
-    try:
-        payload = _run(args)
-        if jax.process_index() == 0:
-            _atomic_json(Path(args.output), payload)
-            print(json.dumps(payload, sort_keys=True), flush=True)
-    finally:
-        jax.distributed.shutdown()
+    payload = _run(args)
+
+    # Keep every worker alive until its peers have completed validation.  An
+    # explicit jax.distributed.shutdown() adds a second internal barrier which
+    # can time out when near-limit device work finishes unevenly across ranks.
+    # Normal process teardown releases the distributed runtime after this
+    # benchmark-level completion barrier.
+    multihost_utils.sync_global_devices("jaxmg_benchmark_case_complete")
+    if jax.process_index() == 0:
+        _atomic_json(Path(args.output), payload)
+        print(json.dumps(payload, sort_keys=True), flush=True)
 
 
 if __name__ == "__main__":
