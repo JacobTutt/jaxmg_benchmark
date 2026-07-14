@@ -22,7 +22,7 @@ For every case, the runner:
 
 1. builds a distributed diagonal system outside the timed region;
 2. runs one cold solve, including compilation;
-3. runs three warm solves using the same compiled configuration;
+3. runs one warm solve using the same compiled configuration;
 4. validates the solution and native status after every solve;
 5. writes one JSON result and one combined log.
 
@@ -40,7 +40,7 @@ are deliberately outside those timings.
 Every case is launched in its own `srun` process group. This is important near
 the memory limit: a CUDA or NCCL out-of-memory error cannot leave state behind
 for the next case. The standard configuration gives a complete case one hour:
-enough for the cold call, three warm calls, and validation, without allowing a
+enough for the cold call, warm call, and validation, without allowing a
 stalled rank to consume most of the outer allocation. If a rank exits with an
 error, `srun --kill-on-bad-exit` stops its peers immediately; the one-hour
 guard is only needed for a genuine collective hang.
