@@ -99,6 +99,7 @@ class ModelTests(unittest.TestCase):
         )
         self.assertEqual(command[command.index("--cpus-per-task") + 1], "72")
         self.assertEqual(command[command.index("--ntasks") + 1], "4")
+        self.assertIn("--kill-on-bad-exit", command)
 
 
 if __name__ == "__main__":

@@ -181,6 +181,9 @@ def _srun_command(
     nodes = case.grid.processes // config.gpus_per_node
     return [
         "srun",
+        # If one rank reports CUDA/NCCL OOM, do not leave the remaining ranks
+        # blocked in a collective until the case timeout expires.
+        "--kill-on-bad-exit",
         "--nodes",
         str(nodes),
         "--ntasks",
