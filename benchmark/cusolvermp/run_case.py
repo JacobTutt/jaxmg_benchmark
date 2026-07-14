@@ -145,17 +145,6 @@ def _make_input_factory(
     return jax.jit(make_inputs, out_shardings=(a_sharding, b_sharding))
 
 
-def _wait_for_inputs(a: jax.Array, b: jax.Array) -> None:
-    """Wait until both input arrays are ready before starting the timer.
-
-    Args:
-        a: Sharded coefficient matrix.
-        b: Sharded or replicated right-hand side.
-    """
-    for leaf in jax.tree_util.tree_leaves((a, b)):
-        leaf.block_until_ready()
-
-
 def _validate(
     *, out: jax.Array, status: jax.Array, status_size: int, dtype_name: str
 ) -> tuple[float, list[int]]:
@@ -189,102 +178,6 @@ def _validate(
     return maximum_error, rank_codes
 
 
-def _solver_for(routine: str):
-    """Load the requested public solver and its per-rank status layout.
-
-    Args:
-        routine: ``"potrs"`` or ``"lu_solve"``.
-
-    Returns:
-        The public JAXMg solver and its native status-vector length.
-    """
-    if routine == "potrs":
-        from jaxmg import potrs as solver
-        from jaxmg._cusolvermp_status import (
-            _CUSOLVERMP_POTRS_STATUS_SIZE as status_size,
-        )
-    else:
-        from jaxmg import lu_solve as solver
-        from jaxmg._cusolvermp_status import (
-            _CUSOLVERMP_LU_SOLVE_STATUS_SIZE as status_size,
-        )
-    return solver, status_size
-
-
-def _check_case(case: BenchmarkCase) -> None:
-    """Check that a case is valid for one-process-per-GPU execution.
-
-    Args:
-        case: Requested benchmark case.
-
-    Raises:
-        ValueError: If the matrix dimension requires padding.
-        RuntimeError: If JAX's processes or visible GPUs do not match the grid.
-    """
-    if case.needs_matrix_padding:
-        raise ValueError(
-            f"{case.case_id} needs matrix padding; N must be divisible by "
-            f"{case.alignment_quantum}"
-        )
-    if jax.process_count() != case.grid.processes:
-        raise RuntimeError(
-            f"expected {case.grid.processes} processes, got {jax.process_count()}"
-        )
-    if len(jax.local_devices(backend="gpu")) != 1:
-        raise RuntimeError("JAXMg requires one visible GPU per Python process")
-
-
-def _phase(iteration: int, cold_runs: int, warm_runs: int) -> tuple[str, int, int]:
-    """Describe the cold or warm phase for a zero-based iteration.
-
-    Args:
-        iteration: Zero-based call index.
-        cold_runs: Number of cold calls, currently one.
-        warm_runs: Number of warm calls after compilation.
-
-    Returns:
-        Phase name, one-based phase index, and total calls in that phase.
-    """
-    if iteration < cold_runs:
-        return "cold", iteration + 1, cold_runs
-    return "warm", iteration - cold_runs + 1, warm_runs
-
-
-def _solve_once(
-    *,
-    solver,
-    a: jax.Array,
-    b: jax.Array,
-    tile_size: int,
-    mesh: Mesh,
-) -> tuple[jax.Array, jax.Array, float]:
-    """Run one solver call and measure the slowest participating rank.
-
-    Args:
-        solver: Public JAXMg POTRS or LU-solve callable.
-        a: Sharded coefficient matrix.
-        b: Right-hand side matching ``a``.
-        tile_size: cuSOLVERMp tile width.
-        mesh: Distributed process mesh.
-
-    Returns:
-        The solution, native status array, and maximum elapsed seconds.
-    """
-    started = time.perf_counter()
-    out, status = solver(
-        a,
-        b,
-        T_A=tile_size,
-        mesh=mesh,
-        matrix_specs=P("pr", "pc"),
-        return_status=True,
-        pad=True,
-    )
-    out.block_until_ready()
-    status.block_until_ready()
-    return out, status, _global_max_seconds(time.perf_counter() - started)
-
-
 def _package_versions() -> dict[str, str | None]:
     """Return installed package versions recorded with each result.
 
@@ -310,13 +203,32 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
     Returns:
         Complete case metadata, timings, validation results, and package data.
     """
-    solver, status_size = _solver_for(args.routine)
+    if args.routine == "potrs":
+        from jaxmg import potrs as solver
+        from jaxmg._cusolvermp_status import (
+            _CUSOLVERMP_POTRS_STATUS_SIZE as status_size,
+        )
+    else:
+        from jaxmg import lu_solve as solver
+        from jaxmg._cusolvermp_status import (
+            _CUSOLVERMP_LU_SOLVE_STATUS_SIZE as status_size,
+        )
 
     config = BenchmarkConfig.load(args.config)
     case = BenchmarkCase(
         args.routine, args.dtype, args.grid, args.matrix_size, args.tile_size
     )
-    _check_case(case)
+    if case.needs_matrix_padding:
+        raise ValueError(
+            f"{case.case_id} needs matrix padding; N must be divisible by "
+            f"{case.alignment_quantum}"
+        )
+    if jax.process_count() != case.grid.processes:
+        raise RuntimeError(
+            f"expected {case.grid.processes} processes, got {jax.process_count()}"
+        )
+    if len(jax.local_devices(backend="gpu")) != 1:
+        raise RuntimeError("JAXMg requires one visible GPU per Python process")
 
     dtype = getattr(jnp, case.dtype)
     mesh = _make_mesh(case.grid)
@@ -327,26 +239,41 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
     maximum_error = 0.0
     rank_codes: list[int] = []
     for iteration in range(config.cold_runs + config.warm_runs):
-        phase, phase_iteration, phase_total = _phase(
-            iteration, config.cold_runs, config.warm_runs
-        )
+        if iteration < config.cold_runs:
+            phase, phase_iteration, phase_total = (
+                "cold",
+                iteration + 1,
+                config.cold_runs,
+            )
+        else:
+            phase, phase_iteration, phase_total = (
+                "warm",
+                iteration - config.cold_runs + 1,
+                config.warm_runs,
+            )
         if jax.process_index() == 0:
             print(
                 f"{case.case_id}: {phase} {phase_iteration}/{phase_total} start",
                 flush=True,
             )
         a, b = make_inputs()
-        _wait_for_inputs(a, b)
+        for array in (a, b):
+            array.block_until_ready()
         multihost_utils.sync_global_devices(f"{case.case_id}_{iteration}_start")
-        out, status, elapsed = _solve_once(
-            solver=solver,
-            a=a,
-            b=b,
-            tile_size=case.tile_size,
+        started = time.perf_counter()
+        out, status = solver(
+            a,
+            b,
+            T_A=case.tile_size,
             mesh=mesh,
+            matrix_specs=P("pr", "pc"),
+            return_status=True,
+            pad=True,
         )
+        out.block_until_ready()
+        status.block_until_ready()
         multihost_utils.sync_global_devices(f"{case.case_id}_{iteration}_stop")
-        timings.append(elapsed)
+        timings.append(_global_max_seconds(time.perf_counter() - started))
         maximum_error, rank_codes = _validate(
             out=out, status=status, status_size=status_size, dtype_name=case.dtype
         )

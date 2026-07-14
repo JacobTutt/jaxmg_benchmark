@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from math import floor, lcm, sqrt
 from pathlib import Path
 import tomllib
-from typing import Iterable
 
 
 DTYPE_BYTES = {
@@ -393,29 +392,3 @@ def planned_sizes(
         if (aligned := _round_up_to_multiple(size, quantum)) < first_near_limit
     }
     return tuple(sorted(baseline | near_limit))
-
-
-def iter_cases(config: BenchmarkConfig, *, routines: Iterable[str] | None = None,
-               dtypes: Iterable[str] | None = None,
-               grids: Iterable[ProcessGrid] | None = None) -> Iterable[BenchmarkCase]:
-    """Yield configured cases in a reproducible order.
-
-    Args:
-        config: Source configuration for routine, dtype, grid, tile, and size
-            selections.
-        routines: Optional subset of configured solver names.
-        dtypes: Optional subset of configured dtype names.
-        grids: Optional subset of configured process grids.
-
-    Yields:
-        One no-padding ``BenchmarkCase`` at a time, ordered by solver, dtype,
-        grid, tile width, and matrix size.
-    """
-    for routine in tuple(routines or config.routines):
-        for dtype in tuple(dtypes or config.dtypes):
-            for grid in tuple(grids or config.grids):
-                for tile_size in config.tiles:
-                    for matrix_size in planned_sizes(
-                        config, dtype=dtype, grid=grid, tile_size=tile_size
-                    ):
-                        yield BenchmarkCase(routine, dtype, grid, matrix_size, tile_size)

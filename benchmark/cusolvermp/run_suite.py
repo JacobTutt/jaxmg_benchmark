@@ -93,25 +93,6 @@ def _write_failure(path: Path, case: BenchmarkCase, returncode: int | str,
     )
 
 
-def _selected_tiles(args: argparse.Namespace, config: BenchmarkConfig) -> tuple[int, ...]:
-    """Return requested tile sizes after checking the configuration.
-
-    Args:
-        args: Parsed suite options, which may include repeated tile filters.
-        config: Benchmark configuration defining allowed tile widths.
-
-    Returns:
-        Selected tile widths in command-line or configuration order.
-
-    Raises:
-        ValueError: If a requested width is not configured.
-    """
-    tiles = tuple(args.tile_size or config.tiles)
-    if set(tiles) - set(config.tiles):
-        raise ValueError("every selected tile size must be configured")
-    return tiles
-
-
 def _selected_sizes(
     args: argparse.Namespace,
     config: BenchmarkConfig,
@@ -163,8 +144,12 @@ def _selected_cases(
     Raises:
         ValueError: If no requested dimension is valid for the selected grid.
     """
+    tiles = tuple(args.tile_size or config.tiles)
+    if set(tiles) - set(config.tiles):
+        raise ValueError("every selected tile size must be configured")
+
     cases = []
-    for tile_size in _selected_tiles(args, config):
+    for tile_size in tiles:
         sizes = _selected_sizes(args, config, tile_size=tile_size)
         cases.extend(
             BenchmarkCase(args.routine, args.dtype, args.grid, size, tile_size)

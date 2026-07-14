@@ -31,40 +31,6 @@ def _arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _case_count(
-    config: BenchmarkConfig, *, dtype: str, grid: ProcessGrid
-) -> int:
-    """Count matrix-size and tile-size combinations in one suite.
-
-    Args:
-        config: Benchmark configuration defining the size sweep.
-        dtype: Matrix element dtype.
-        grid: GPU process grid.
-
-    Returns:
-        Number of fresh ``srun`` cases the outer job will launch.
-    """
-    return sum(
-        len(planned_sizes(config, dtype=dtype, grid=grid, tile_size=tile))
-        for tile in config.tiles
-    )
-
-
-def _job_name(routine: str, dtype: str, grid: ProcessGrid) -> str:
-    """Return a short Slurm job name that remains readable in ``squeue``.
-
-    Args:
-        routine: Solver name.
-        dtype: Matrix element dtype.
-        grid: GPU process grid.
-
-    Returns:
-        A compact job name containing the solver, dtype, and grid.
-    """
-    short_dtype = dtype.replace("complex", "c").replace("float", "f")
-    return f"jaxmg_{routine}_{short_dtype}_{grid}"
-
-
 def _submission_command(
     *,
     config: BenchmarkConfig,
@@ -108,7 +74,7 @@ def _submission_command(
     return [
         "sbatch",
         "--job-name",
-        _job_name(routine, dtype, grid),
+        f"jaxmg_{routine}_{dtype.replace('complex', 'c').replace('float', 'f')}_{grid}",
         "--nodes",
         str(nodes),
         "--ntasks",
@@ -150,7 +116,17 @@ def main() -> None:
             for grid in grids:
                 if grid not in config.grids:
                     raise ValueError(f"grid {grid} is not configured")
-                case_count = _case_count(config, dtype=dtype, grid=grid)
+                case_count = sum(
+                    len(
+                        planned_sizes(
+                            config,
+                            dtype=dtype,
+                            grid=grid,
+                            tile_size=tile_size,
+                        )
+                    )
+                    for tile_size in config.tiles
+                )
                 total_cases += case_count
                 command = _submission_command(
                     config=config,
