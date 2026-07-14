@@ -45,7 +45,14 @@ extra_args=()
 if [[ -n "${JAXMG_BENCHMARK_TILE_SIZE:-}" ]]; then
     extra_args+=(--tile-size "${JAXMG_BENCHMARK_TILE_SIZE}")
 fi
-if [[ -n "${JAXMG_BENCHMARK_MATRIX_SIZE:-}" ]]; then
+if [[ -n "${JAXMG_BENCHMARK_MATRIX_SIZES:-}" ]]; then
+    # Space-separated explicit sizes are useful for a tightly bracketed
+    # memory-limit probe.  run_suite still launches each case in a fresh srun.
+    read -r -a matrix_sizes <<< "${JAXMG_BENCHMARK_MATRIX_SIZES}"
+    for matrix_size in "${matrix_sizes[@]}"; do
+        extra_args+=(--matrix-size "${matrix_size}")
+    done
+elif [[ -n "${JAXMG_BENCHMARK_MATRIX_SIZE:-}" ]]; then
     extra_args+=(--matrix-size "${JAXMG_BENCHMARK_MATRIX_SIZE}")
 fi
 
