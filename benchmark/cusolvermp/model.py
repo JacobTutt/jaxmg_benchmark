@@ -208,19 +208,27 @@ class BenchmarkCase:
 
 def planned_sizes(config: BenchmarkConfig, *, dtype: str, grid: ProcessGrid,
                   tile_size: int) -> tuple[int, ...]:
-    """Plan aligned baseline and raw-memory-frontier matrix sizes."""
+    """Plan aligned baseline and raw-memory-frontier matrix sizes.
+
+    Baseline points are retained only below the first 85% frontier point. This
+    prevents the shared default ladder from duplicating or obscuring the
+    deliberately denser high-utilisation sweep.
+    """
     itemsize = DTYPE_BYTES[dtype]
     quantum = tile_size * _lcm(grid.rows, grid.cols)
     raw_limit = floor(sqrt(config.allocator_budget_per_gpu * grid.processes / itemsize))
+    frontier = {
+        floor(sqrt(fraction) * raw_limit) // quantum * quantum
+        for fraction in config.frontier_fractions
+    }
+    first_frontier = min(size for size in frontier if size >= quantum)
     values = {
         ((size + quantum - 1) // quantum) * quantum
         for size in config.baseline_sizes
-        if ((size + quantum - 1) // quantum) * quantum <= raw_limit
+        if ((size + quantum - 1) // quantum) * quantum < first_frontier
+        and ((size + quantum - 1) // quantum) * quantum <= raw_limit
     }
-    for fraction in config.frontier_fractions:
-        aligned = floor(sqrt(fraction) * raw_limit) // quantum * quantum
-        if aligned >= quantum:
-            values.add(aligned)
+    values.update(frontier)
     return tuple(sorted(values))
 
 

@@ -54,6 +54,18 @@ class ModelTests(unittest.TestCase):
                         case = BenchmarkCase("potrs", dtype, grid, size, tile)
                         self.assertFalse(case.needs_matrix_padding, case.case_id)
 
+    def test_large_grid_has_baseline_bridges_before_frontier(self):
+        """Shared baselines fill the multi-node gap without entering 85% sweep."""
+        sizes = planned_sizes(
+            self.config,
+            dtype="float32",
+            grid=ProcessGrid(4, 4),
+            tile_size=256,
+        )
+        self.assertTrue({327680, 393216, 458752, 524288}.issubset(sizes))
+        self.assertEqual(sizes[-8], 586752)
+        self.assertNotIn(589824, sizes)
+
 
 if __name__ == "__main__":
     unittest.main()

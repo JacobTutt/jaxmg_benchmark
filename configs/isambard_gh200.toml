@@ -10,11 +10,12 @@ routines = ["potrs", "lu_solve"]
 dtypes = ["float32", "float64", "complex64", "complex128"]
 tiles = [256, 512, 1024, 2048, 4096]
 grids = ["4x1", "2x2", "8x1", "4x2", "12x1", "6x2", "4x3", "16x1", "8x2", "4x4"]
-baseline_sizes = [512, 1024, 2048, 4096, 8192, 16384, 32768, 49152, 65536, 98304, 131072, 196608, 262144]
+# The planner uses these only below its case-specific 85% memory frontier.
+# The final four values bridge naturally to larger multi-node configurations.
+baseline_sizes = [512, 1024, 2048, 4096, 8192, 16384, 32768, 49152, 65536, 98304, 131072, 196608, 262144, 327680, 393216, 458752, 524288]
 frontier_fractions = [0.85, 0.90, 0.92, 0.94, 0.96, 0.98, 0.99, 1.00]
 
 [execution]
 cold_runs = 1
 warm_runs = 3
 case_timeout_seconds = 21600
-
