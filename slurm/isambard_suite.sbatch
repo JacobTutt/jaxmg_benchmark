@@ -41,11 +41,19 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.99
 export NCCL_CUMEM_ENABLE="${NCCL_CUMEM_ENABLE:-0}"
 export OMP_NUM_THREADS=1
 
+extra_args=()
+if [[ -n "${JAXMG_BENCHMARK_TILE_SIZE:-}" ]]; then
+    extra_args+=(--tile-size "${JAXMG_BENCHMARK_TILE_SIZE}")
+fi
+if [[ -n "${JAXMG_BENCHMARK_MATRIX_SIZE:-}" ]]; then
+    extra_args+=(--matrix-size "${JAXMG_BENCHMARK_MATRIX_SIZE}")
+fi
+
 python -m benchmark.cusolvermp.run_suite \
     --config "${JAXMG_BENCHMARK_CONFIG}" \
     --routine "${JAXMG_BENCHMARK_ROUTINE}" \
     --dtype "${JAXMG_BENCHMARK_DTYPE}" \
     --grid "${JAXMG_BENCHMARK_GRID}" \
     --output-root "${JAXMG_BENCHMARK_OUTPUT_ROOT}" \
-    --retry-failures
-
+    --retry-failures \
+    "${extra_args[@]}"
