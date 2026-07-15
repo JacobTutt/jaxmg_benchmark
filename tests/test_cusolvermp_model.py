@@ -15,10 +15,6 @@ from benchmark.cusolvermp.run_suite import _selected_sizes, _srun_command
 
 CONFIG = Path(__file__).parents[1] / "configs" / "isambard_gh200.toml"
 H200_CONFIG = Path(__file__).parents[1] / "configs" / "example_h200_8gpu.toml"
-LIMIT_CONFIGS = (
-    Path(__file__).parents[1] / "configs" / "isambard_gh200_limit_probe.toml",
-    Path(__file__).parents[1] / "configs" / "isambard_gh200_limit_probe_8g.toml",
-)
 
 
 class ModelTests(unittest.TestCase):
@@ -38,7 +34,7 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(self.config.suite_memory, "400G")
 
     def test_all_configurations_use_the_common_schema(self):
-        for path in (CONFIG, *LIMIT_CONFIGS):
+        for path in (CONFIG, H200_CONFIG):
             config = BenchmarkConfig.load(path)
             self.assertTrue(config.suite_walltime)
             self.assertTrue(config.suite_memory)
