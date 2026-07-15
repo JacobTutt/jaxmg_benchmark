@@ -12,9 +12,15 @@ Each benchmark case is defined by:
 - the matrix dimension `N`;
 - the tile width `T_A`.
 
-The default Isambard configuration covers 4, 8, 12, and 16 GPUs, the grids
-listed in `configs/isambard_gh200.toml`, tile widths from 256 to 4096, and all
-four supported real and complex dtypes.
+The benchmark is configured from TOML rather than for one fixed cluster. A
+profile records visible memory per GPU, GPUs per node, CPUs per GPU, node
+counts, tile widths, and datatypes. Matrix sizes near the memory frontier and
+the supported process grids are then generated from that hardware profile.
+
+`configs/isambard_gh200.toml` is the profile used for the included Isambard
+results. `configs/example_h200_8gpu.toml` demonstrates an eight-H200 node: one
+node automatically produces `8x1` and `4x2` grids and its larger HBM capacity
+produces correspondingly larger near-limit matrices.
 
 ## What A Case Measures
 
@@ -56,7 +62,8 @@ source .venv/bin/activate
 pip install -r requirements_cusolvermp_cuda12.txt
 ```
 
-The Isambard Slurm wrapper expects:
+The generic Slurm wrapper can activate a virtual environment and optionally
+import an editable JAXMg checkout:
 
 ```bash
 export JAXMG_BENCHMARK_VENV=/projects/u6my/users/$USER/JAXMG/venvs/jaxmg-cu12
@@ -66,7 +73,15 @@ export JAXMG_SOURCE_ROOT=/projects/u6my/users/$USER/JAXMG/jaxmg
 `JAXMG_SOURCE_ROOT` is optional. When set, it lets the benchmark import that
 source checkout instead of the wheel installed in the virtual environment.
 
-The wrapper uses the allocator settings that have been validated on Isambard:
+Cluster-specific modules and library paths belong in a short setup script. For
+Isambard, use the supplied profile:
+
+```bash
+export JAXMG_BENCHMARK_SETUP="$PWD/cluster_setup/isambard.sh"
+```
+
+The generic wrapper defaults to the following allocator settings; each can be
+overridden in the submission environment:
 
 ```bash
 export XLA_PYTHON_CLIENT_ALLOCATOR=vmm
@@ -76,10 +91,34 @@ export NCCL_CUMEM_ENABLE=0
 
 ## Plan And Submit
 
+Create or select a hardware profile first. `visible_memory_mib` is the HBM
+reported by `nvidia-smi` for one GPU, not the marketing capacity or aggregate
+node memory. For automatic grid generation, set:
+
+```toml
+[hardware]
+visible_memory_mib = 143771
+gpus_per_node = 8
+cpus_per_gpu = 16
+
+[sweep]
+node_counts = [1, 2]
+
+[slurm]
+# Optional site-specific sbatch arguments:
+submit_args = ["--partition=gpu", "--account=my-project"]
+```
+
+For each node count, the planner generates every factor grid with the longer
+dimension first. Eight GPUs therefore gives `8x1` and `4x2`; sixteen gives
+`16x1`, `8x2`, and `4x4`. To benchmark another orientation or a restricted
+topology, replace `node_counts` with an explicit list such as
+`grids = ["2x4", "4x4"]`.
+
 First inspect the jobs and their case counts. This does not submit anything:
 
 ```bash
-python -m benchmark.cusolvermp.submit
+python -m benchmark.cusolvermp.submit --config configs/isambard_gh200.toml
 ```
 
 Restrict the output to one solver, dtype, and grid while checking a smaller
@@ -87,6 +126,7 @@ part of the sweep:
 
 ```bash
 python -m benchmark.cusolvermp.submit \
+  --config configs/isambard_gh200.toml \
   --routine potrs --dtype float32 --grid 4x1
 ```
 
@@ -94,6 +134,7 @@ Add `--submit` after reviewing the commands:
 
 ```bash
 python -m benchmark.cusolvermp.submit \
+  --config configs/isambard_gh200.toml \
   --routine potrs --dtype float32 --grid 4x1 --submit
 ```
 

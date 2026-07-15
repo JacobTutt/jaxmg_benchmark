@@ -20,6 +20,8 @@ DTYPE_BYTES = {
     "complex64": 8,
     "complex128": 16,
 }
+
+
 @dataclass(frozen=True, order=True)
 class ProcessGrid:
     """Two-dimensional arrangement of the GPU processes used by cuSOLVERMp.
@@ -63,6 +65,31 @@ class ProcessGrid:
         return f"{self.rows}x{self.cols}"
 
 
+def factor_grids(processes: int) -> tuple[ProcessGrid, ...]:
+    """Return the non-transposed rectangular grids for a process count.
+
+    The long dimension is placed first, matching the benchmark's historical
+    ``Nx1``, ``(N/2)x2``, ... convention. Transposed layouts can still be
+    requested explicitly with ``sweep.grids``.
+
+    Args:
+        processes: Total number of one-GPU Python processes.
+
+    Returns:
+        Factor grids ordered from the most elongated to the most square.
+
+    Raises:
+        ValueError: If ``processes`` is not positive.
+    """
+    if processes < 1:
+        raise ValueError("process count must be positive")
+    return tuple(
+        ProcessGrid(processes // cols, cols)
+        for cols in range(1, int(sqrt(processes)) + 1)
+        if processes % cols == 0
+    )
+
+
 @dataclass(frozen=True)
 class BenchmarkConfig:
     """Hardware, case-selection, execution, and Slurm settings from TOML.
@@ -83,11 +110,13 @@ class BenchmarkConfig:
     baseline_sizes: tuple[int, ...]
     frontier_fractions: tuple[float, ...]
     grids: tuple[ProcessGrid, ...]
+    node_counts: tuple[int, ...]
     cold_runs: int
     warm_runs: int
     case_timeout_seconds: int
     suite_walltime: str
     suite_memory: str
+    slurm_args: tuple[str, ...]
 
     @classmethod
     def load(cls, path: str | Path) -> "BenchmarkConfig":
@@ -108,6 +137,18 @@ class BenchmarkConfig:
             raw = tomllib.load(stream)
         hardware, sweep = raw["hardware"], raw["sweep"]
         execution, slurm = raw["execution"], raw["slurm"]
+        node_counts = tuple(int(value) for value in sweep.get("node_counts", ()))
+        explicit_grids = tuple(
+            ProcessGrid.parse(value) for value in sweep.get("grids", ())
+        )
+        if explicit_grids:
+            grids = explicit_grids
+        else:
+            grids = tuple(
+                grid
+                for nodes in node_counts
+                for grid in factor_grids(nodes * int(hardware["gpus_per_node"]))
+            )
         config = cls(
             gpu_name=str(hardware["gpu_name"]),
             visible_memory_mib=int(hardware["visible_memory_mib"]),
@@ -119,12 +160,14 @@ class BenchmarkConfig:
             routines=tuple(str(value) for value in sweep["routines"]),
             baseline_sizes=tuple(int(value) for value in sweep["baseline_sizes"]),
             frontier_fractions=tuple(float(value) for value in sweep["frontier_fractions"]),
-            grids=tuple(ProcessGrid.parse(value) for value in sweep["grids"]),
+            grids=grids,
+            node_counts=node_counts,
             cold_runs=int(execution["cold_runs"]),
             warm_runs=int(execution["warm_runs"]),
             case_timeout_seconds=int(execution["case_timeout_seconds"]),
             suite_walltime=str(slurm["suite_walltime"]),
             suite_memory=str(slurm["suite_memory"]),
+            slurm_args=tuple(str(value) for value in slurm.get("submit_args", ())),
         )
         config.validate()
         return config
@@ -150,6 +193,10 @@ class BenchmarkConfig:
             raise ValueError("routines must be potrs and/or lu_solve")
         if any(tile < 1 for tile in self.tiles):
             raise ValueError("tile sizes must be positive")
+        if not self.grids:
+            raise ValueError("configure sweep.grids or sweep.node_counts")
+        if any(nodes < 1 for nodes in self.node_counts):
+            raise ValueError("node counts must be positive")
         if self.cold_runs != 1 or self.warm_runs < 1:
             raise ValueError("the suite requires one cold run and at least one warm run")
         if not self.suite_walltime or not self.suite_memory:

@@ -7,12 +7,14 @@ from benchmark.cusolvermp.model import (
     BenchmarkCase,
     BenchmarkConfig,
     ProcessGrid,
+    factor_grids,
     planned_sizes,
 )
 from benchmark.cusolvermp.run_suite import _selected_sizes, _srun_command
 
 
 CONFIG = Path(__file__).parents[1] / "configs" / "isambard_gh200.toml"
+H200_CONFIG = Path(__file__).parents[1] / "configs" / "example_h200_8gpu.toml"
 LIMIT_CONFIGS = (
     Path(__file__).parents[1] / "configs" / "isambard_gh200_limit_probe.toml",
     Path(__file__).parents[1] / "configs" / "isambard_gh200_limit_probe_8g.toml",
@@ -40,6 +42,33 @@ class ModelTests(unittest.TestCase):
             config = BenchmarkConfig.load(path)
             self.assertTrue(config.suite_walltime)
             self.assertTrue(config.suite_memory)
+
+    def test_grids_are_generated_from_node_counts(self):
+        self.assertEqual(
+            self.config.grids,
+            (
+                ProcessGrid(4, 1), ProcessGrid(2, 2),
+                ProcessGrid(8, 1), ProcessGrid(4, 2),
+                ProcessGrid(12, 1), ProcessGrid(6, 2), ProcessGrid(4, 3),
+                ProcessGrid(16, 1), ProcessGrid(8, 2), ProcessGrid(4, 4),
+            ),
+        )
+
+    def test_eight_gpu_node_generates_h200_style_grids(self):
+        self.assertEqual(
+            factor_grids(8),
+            (ProcessGrid(8, 1), ProcessGrid(4, 2)),
+        )
+
+    def test_larger_hbm_generates_larger_frontier_cases(self):
+        h200 = BenchmarkConfig.load(H200_CONFIG)
+        gh200_sizes = planned_sizes(
+            self.config, dtype="float32", grid=ProcessGrid(8, 1), tile_size=256
+        )
+        h200_sizes = planned_sizes(
+            h200, dtype="float32", grid=ProcessGrid(8, 1), tile_size=256
+        )
+        self.assertGreater(max(h200_sizes), max(gh200_sizes))
 
     def test_alignment_quantum_uses_grid_lcm(self):
         case = BenchmarkCase("potrs", "float32", ProcessGrid(6, 2), 24576, 1024)

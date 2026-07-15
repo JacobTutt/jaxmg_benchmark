@@ -11,7 +11,8 @@ cpus_per_gpu = 72
 routines = ["potrs", "lu_solve"]
 dtypes = ["float32", "float64", "complex64", "complex128"]
 tiles = [256, 512, 1024, 2048, 4096]
-grids = ["4x1", "2x2", "8x1", "4x2", "12x1", "6x2", "4x3", "16x1", "8x2", "4x4"]
+# Generate every non-transposed factor grid for 1, 2, 3, and 4 complete nodes.
+node_counts = [1, 2, 3, 4]
 # The planner uses these only below its case-specific 85% memory frontier.
 # The final four values bridge naturally to larger multi-node configurations.
 baseline_sizes = [512, 1024, 2048, 4096, 8192, 16384, 32768, 49152, 65536, 98304, 131072, 196608, 262144, 327680, 393216, 458752, 524288]

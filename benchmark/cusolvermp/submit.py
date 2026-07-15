@@ -21,8 +21,8 @@ def _arguments() -> argparse.Namespace:
         whether Slurm submission was requested.
     """
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="configs/isambard_gh200.toml")
-    parser.add_argument("--script", default="slurm/isambard_suite.sbatch")
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--script", default="slurm/suite.sbatch")
     parser.add_argument("--output-root", default="results")
     parser.add_argument("--routine", action="append", choices=("potrs", "lu_solve"))
     parser.add_argument("--dtype", action="append", choices=("float32", "float64", "complex64", "complex128"))
@@ -95,6 +95,7 @@ def _submission_command(
         "slurm-logs/%x-%j.err",
         "--export",
         exported,
+        *config.slurm_args,
         str(script_path),
     ]
 
