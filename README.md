@@ -66,7 +66,7 @@ Choose the node counts to benchmark:
 
 ```toml
 [sweep]
-node_counts = [1, 2]
+node_counts = [1, 2, 3, 4]
 ```
 
 The planner creates each non-transposed factor grid automatically. On an
@@ -75,6 +75,8 @@ eight-GPU node this gives:
 ```text
 1 node:  8x1, 4x2
 2 nodes: 16x1, 8x2, 4x4
+3 nodes: 24x1, 12x2, 8x3, 6x4
+4 nodes: 32x1, 16x2, 8x4
 ```
 
 To select grids manually, replace `node_counts` with, for example:

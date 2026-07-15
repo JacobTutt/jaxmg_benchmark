@@ -51,10 +51,13 @@ class ModelTests(unittest.TestCase):
         )
 
     def test_eight_gpu_node_generates_h200_style_grids(self):
+        h200 = BenchmarkConfig.load(H200_CONFIG)
         self.assertEqual(
             factor_grids(8),
             (ProcessGrid(8, 1), ProcessGrid(4, 2)),
         )
+        self.assertIn(ProcessGrid(32, 1), h200.grids)
+        self.assertIn(ProcessGrid(8, 4), h200.grids)
 
     def test_larger_hbm_generates_larger_frontier_cases(self):
         h200 = BenchmarkConfig.load(H200_CONFIG)

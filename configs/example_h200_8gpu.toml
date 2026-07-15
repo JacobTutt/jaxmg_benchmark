@@ -10,10 +10,10 @@ cpus_per_gpu = 16
 routines = ["potrs", "lu_solve"]
 dtypes = ["float32", "float64", "complex64", "complex128"]
 tiles = [256, 512, 1024, 2048, 4096]
-# This automatically generates 8x1 and 4x2 for one node, then 16x1, 8x2,
-# and 4x4 for two nodes. Set explicit `grids = [...]` instead when required.
-node_counts = [1, 2]
-baseline_sizes = [512, 1024, 2048, 4096, 8192, 16384, 32768, 49152, 65536, 98304, 131072, 196608, 262144, 327680, 393216, 458752, 524288]
+# Generate factor grids for 8, 16, 24, and 32 GPUs. Set explicit
+# `grids = [...]` instead when a restricted topology is required.
+node_counts = [1, 2, 3, 4]
+baseline_sizes = [512, 1024, 2048, 4096, 8192, 16384, 32768, 49152, 65536, 98304, 131072, 196608, 262144, 327680, 393216, 458752, 524288, 589824, 655360, 720896, 786432, 851968, 917504, 983040, 1048576, 1179648]
 frontier_fractions = [0.85, 0.90, 0.92, 0.94, 0.96, 0.98, 0.99, 1.00]
 
 [execution]
