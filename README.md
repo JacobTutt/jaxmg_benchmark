@@ -87,6 +87,21 @@ The profile also contains the routines, datatypes, tile sizes, timing limits,
 and Slurm resources. Optional site arguments can be added directly:
 
 ```toml
+[execution]
+cold_runs = 1
+warm_runs = 3
+case_timeout_seconds = 3600
+```
+
+`cold_runs` must remain `1`. Set `warm_runs` to the number of timed calls made
+after compilation; the result records every warm duration and reports their
+median, minimum, and maximum. `case_timeout_seconds` limits the complete fresh
+process-group case, so increase it when adding warm calls or benchmarking very
+large matrices.
+
+Slurm resources and optional site arguments are configured separately:
+
+```toml
 [slurm]
 suite_walltime = "12:00:00"
 suite_memory = "512G"
