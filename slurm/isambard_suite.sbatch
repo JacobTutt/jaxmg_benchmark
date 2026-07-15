@@ -12,6 +12,13 @@ set -euo pipefail
 module load cray-python/3.11.7 cuda/12.6 gcc-native/14.2
 source "${JAXMG_BENCHMARK_VENV}/bin/activate"
 
+# Some Isambard nodes do not provision Slurm's default /local/user/<uid>
+# directory. JAX invokes ptxas while compiling the input factory, so force all
+# CUDA compiler temporary files to the standard writable node-local location.
+export TMPDIR=/tmp
+export TMP=/tmp
+export TEMP=/tmp
+
 # Use an editable checkout when requested; otherwise use the installed wheel.
 if [[ -n "${JAXMG_SOURCE_ROOT:-}" ]]; then
     export PYTHONPATH="${JAXMG_SOURCE_ROOT}/src:${SLURM_SUBMIT_DIR}:${PYTHONPATH:-}"
