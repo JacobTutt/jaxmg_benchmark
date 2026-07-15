@@ -105,10 +105,16 @@ Slurm resources and optional site arguments are configured separately:
 
 ```toml
 [slurm]
+# Maximum time for one complete routine/dtype/grid sweep.
 suite_walltime = "12:00:00"
+# Host CPU RAM requested per node. This is not GPU memory.
 suite_memory = "512G"
 submit_args = ["--partition=gpu", "--account=my-project"]
 ```
+
+`suite_memory` becomes the Slurm `--mem` request and therefore means host CPU
+RAM per allocated node. It is unrelated to `visible_memory_mib`, which controls
+the GPU-memory-based matrix-size planner.
 
 ## 2. Set Up The Compute-Node Environment
 
@@ -139,6 +145,15 @@ export JAXMG_BENCHMARK_SETUP="$PWD/cluster_setup/my_cluster.sh"
 ```
 
 Skip this variable when your Python environment already provides everything.
+
+There are two places to adapt Slurm execution:
+
+- edit `[slurm]` in `configs/my_cluster.toml` for wall time, host memory,
+  partition, account, or QOS arguments;
+- edit `cluster_setup/my_cluster.sh` for `module load` commands and environment
+  variables needed on the compute nodes.
+
+The generic `slurm/suite.sbatch` runner normally does not need editing.
 
 The runner defaults to:
 
@@ -229,15 +244,6 @@ python -m benchmark.cusolvermp.plot \
   --routine potrs \
   --dtype float32 \
   --grid 8x1
-```
-
-## Tests
-
-The CPU-only tests verify configuration parsing, grid generation, alignment,
-memory accounting, and command construction:
-
-```bash
-python -m unittest discover -s tests -v
 ```
 
 `configs/isambard_gh200.toml` and `cluster_setup/isambard.sh` are examples of

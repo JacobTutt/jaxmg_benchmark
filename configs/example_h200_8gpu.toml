@@ -22,7 +22,9 @@ warm_runs = 1
 case_timeout_seconds = 3600
 
 [slurm]
+# Maximum time for one complete routine/dtype/grid sweep.
 suite_walltime = "24:00:00"
+# Host CPU RAM requested per node with `sbatch --mem`; this is not GPU HBM.
 suite_memory = "512G"
 # Add site requirements when needed, for example:
 # submit_args = ["--partition=gpu", "--account=my-project"]

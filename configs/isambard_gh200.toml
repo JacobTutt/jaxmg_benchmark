@@ -30,4 +30,5 @@ case_timeout_seconds = 3600
 # One outer job runs every selected matrix size and tile size for a single
 # solver, dtype, and process-grid choice.
 suite_walltime = "24:00:00"
+# Host CPU RAM requested per node with `sbatch --mem`; this is not GPU HBM.
 suite_memory = "400G"
