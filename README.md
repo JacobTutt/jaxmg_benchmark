@@ -227,6 +227,77 @@ native status values, topology, package versions, and known memory estimates.
 The estimate includes the local matrix, RHS capacity, redistribution scratch,
 and LU pivots. cuSOLVERMp's internal workspace is not known before execution.
 
+A successful record has this general form (some metadata fields are omitted
+here for brevity):
+
+```json
+{
+  "case_id": "potrs__float32__g8x1__n393216__t512",
+  "status": "passed",
+  "routine": "potrs",
+  "dtype": "float32",
+  "process_rows": 8,
+  "process_cols": 1,
+  "matrix_size": 393216,
+  "tile_size": 512,
+  "cold_seconds": [320.55],
+  "warm_seconds": [317.19, 316.84, 317.02],
+  "warm_median_seconds": 317.02,
+  "warm_min_seconds": 316.84,
+  "warm_max_seconds": 317.19,
+  "max_abs_error": 2.98e-08,
+  "native_status_codes": [0, 0, 0, 0, 0, 0, 0, 0],
+  "local_matrix_bytes": 77309411328,
+  "redistribution_scratch_bytes": 2415919104,
+  "known_total_bytes": 79825993728,
+  "known_budget_fraction": 0.7857,
+  "solver_workspace_bytes": null
+}
+```
+
+The principal fields are:
+
+| Field | Meaning |
+|---|---|
+| `case_id` | Stable routine, datatype, grid, matrix-size, and tile-size identifier. |
+| `cold_seconds` | Solve durations that include first-call compilation. |
+| `warm_seconds` | Individual post-compilation solve durations. |
+| `warm_median_seconds` | Primary warm timing used by the plotting command. |
+| `max_abs_error` | Largest absolute difference from the expected solution. |
+| `native_status_codes` | One native backend status value per participating rank; successful calls report zeros. |
+| `local_matrix_bytes` | Input-matrix shard stored by one GPU process. |
+| `redistribution_scratch_bytes` | Native redistribution scratch allocation per GPU process. |
+| `known_total_bytes` | Matrix, RHS capacity, redistribution scratch, and LU pivots known before the solve. |
+| `known_budget_fraction` | `known_total_bytes` divided by the configured per-GPU allocator budget. |
+| `solver_workspace_bytes` | cuSOLVERMp workspace when known; currently `null` because the library chooses it internally. |
+
+All durations are seconds and all memory sizes are bytes. The full record also
+stores allocator settings, Slurm job information, GPU identity, JAX/JAXMg
+versions, alignment information, and the global matrix size.
+
+A failed case is deliberately smaller because timing and validation may never
+have completed:
+
+```json
+{
+  "case_id": "potrs__float32__g8x1__n450560__t256",
+  "status": "failed",
+  "routine": "potrs",
+  "dtype": "float32",
+  "process_rows": 8,
+  "process_cols": 1,
+  "matrix_size": 450560,
+  "tile_size": 256,
+  "returncode": 1,
+  "elapsed_seconds": 18.42
+}
+```
+
+`returncode` is the failed `srun` exit code, or `"timeout"` when the configured
+case limit was reached. The corresponding file under `logs/` contains the
+combined stdout and stderr needed to distinguish an OOM, NCCL error,
+validation failure, or launcher problem.
+
 Collect all records into CSV and JSONL tables:
 
 ```bash
@@ -235,6 +306,10 @@ python -m benchmark.cusolvermp.collect \
   --csv results/my_cluster/summary.csv \
   --jsonl results/my_cluster/summary.jsonl
 ```
+
+The collected files contain one row or JSON object per case. Successful and
+failed records are retained together, so filter on `status == "passed"` before
+using timings in a performance plot.
 
 Plot one completed configuration:
 
